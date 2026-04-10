@@ -41,7 +41,7 @@ def tokenize_plus(model: HookedTransformer, inputs: List[str], max_length: Optio
 
 def make_hooks_and_matrices(
     model: HookedTransformer, graph: Graph, batch_size:int , n_pos:int, scores: Optional[Tensor],
-    keep_pos_dim:bool=False,
+    keep_pos_dims:bool=False,
 ):
     """Makes a matrix, and hooks to fill it and the score matrix up
 
@@ -52,6 +52,7 @@ def make_hooks_and_matrices(
         n_pos (int): size of the position dimension
         scores (Tensor): The scores tensor you intend to fill.
             If you pass in None, we assume that you're using these hooks / matrices for evaluation only (so don't use the backwards hooks!)
+        keep_pos_dims (bool): Whether to keep the position dimensions for position sensitive circuits. Defaults to False.
 
     Returns:
         Tuple[Tuple[List, List, List], Tensor]:
@@ -102,7 +103,7 @@ def make_hooks_and_matrices(
             raise e
 
     def gradient_hook(
-        prev_index: int, bwd_index: Union[slice, int], gradients:torch.Tensor, hook, keep_pos_dim:bool=False,
+        prev_index: int, bwd_index: Union[slice, int], gradients:torch.Tensor, hook, keep_pos_dims:bool=False,
     ):
         """Takes in a gradient and uses it and activation_difference 
         to compute an update to the score matrix
@@ -123,7 +124,7 @@ def make_hooks_and_matrices(
             s = einsum(
                 activation_difference[:, :, :prev_index],
                 grads,
-                f'batch pos forward hidden, batch pos backward hidden ->{" pos" if keep_pos_dim else ""} forward backward'
+                f'batch pos1 forward hidden, batch pos2 backward hidden ->{" pos1 pos2" if keep_pos_dims else ""} forward backward'
             )
             s = s.squeeze(1)
             scores[...,:prev_index, bwd_index] += s #(pos) n_forward n_backward
@@ -151,7 +152,7 @@ def make_hooks_and_matrices(
                 node.qkv_inputs[i],
                 partial(
                     gradient_hook,
-                    prev_index=prev_index, bwd_index=bwd_index, keep_pos_dim=keep_pos_dim,
+                    prev_index=prev_index, bwd_index=bwd_index, keep_pos_dims=keep_pos_dims,
                 )
             ))
 
@@ -165,7 +166,7 @@ def make_hooks_and_matrices(
             node.in_hook,
             partial(
                 gradient_hook,
-                prev_index=prev_index, bwd_index=bwd_index, keep_pos_dim=keep_pos_dim,
+                prev_index=prev_index, bwd_index=bwd_index, keep_pos_dims=keep_pos_dims,
             )
         ))
 
@@ -176,7 +177,7 @@ def make_hooks_and_matrices(
         node.in_hook,
         partial(
             gradient_hook,
-            prev_index=prev_index, bwd_index=bwd_index, keep_pos_dim=keep_pos_dim,
+            prev_index=prev_index, bwd_index=bwd_index, keep_pos_dims=keep_pos_dims,
         )
     ))
 

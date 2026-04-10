@@ -40,7 +40,8 @@ def get_scores_exact(model: HookedTransformer, graph: Graph, dataloader:DataLoad
     # This is just to make the return type the same as all of the others; we've actually already updated the score matrix
     return graph.scores
 
-
+#TODO: new intervention keyword for "self-defined corrupted activations"
+#TODO modify the other functions too (for position-sensitive circuits and self-defined corrupted activations)
 def get_scores_eap(
     model: HookedTransformer, graph: Graph, metric: Callable[[Tensor], Tensor],
     dataloader:DataLoader,
@@ -65,7 +66,7 @@ def get_scores_eap(
         assert len(dataloader)==1, "positional is currently only implemented for single input"
         clean, corrupted, label = next(iter(dataloader))
         clean_tokens, attention_mask, input_lengths, n_pos = tokenize_plus(model, clean)
-        scores_shape = (n_pos, graph.n_forward, graph.n_backward)
+        scores_shape = (n_pos, n_pos, graph.n_forward, graph.n_backward)
     else:
         scores_shape = (graph.n_forward, graph.n_backward)
 
@@ -94,7 +95,7 @@ def get_scores_eap(
 
         #activation_difference (almost) doesn't appear explicitly later on, but it's necessary for the hooks to work
         (fwd_hooks_corrupted, fwd_hooks_clean, bwd_hooks), activation_difference = make_hooks_and_matrices(
-            model, graph, batch_size, n_pos, scores, keep_pos_dim=keep_pos_dim,
+            model, graph, batch_size, n_pos, scores, keep_pos_dims=keep_pos_dim,
         )
 
         with torch.inference_mode():
