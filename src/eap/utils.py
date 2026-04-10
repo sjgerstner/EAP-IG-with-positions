@@ -39,7 +39,10 @@ def tokenize_plus(model: HookedTransformer, inputs: List[str], max_length: Optio
     n_pos = attention_mask.size(1)
     return tokens, attention_mask, input_lengths, n_pos
 
-def make_hooks_and_matrices(model: HookedTransformer, graph: Graph, batch_size:int , n_pos:int, scores: Optional[Tensor]):
+def make_hooks_and_matrices(
+    model: HookedTransformer, graph: Graph, batch_size:int , n_pos:int, scores: Optional[Tensor],
+    keep_pos_dim:bool=False,
+):
     """Makes a matrix, and hooks to fill it and the score matrix up
 
     Args:
@@ -47,25 +50,39 @@ def make_hooks_and_matrices(model: HookedTransformer, graph: Graph, batch_size:i
         graph (Graph): graph to attribute
         batch_size (int): size of the particular batch you're attributing
         n_pos (int): size of the position dimension
-        scores (Tensor): The scores tensor you intend to fill. If you pass in None, we assume that you're using these hooks / matrices for evaluation only (so don't use the backwards hooks!)
+        scores (Tensor): The scores tensor you intend to fill.
+            If you pass in None, we assume that you're using these hooks / matrices for evaluation only (so don't use the backwards hooks!)
 
     Returns:
-        Tuple[Tuple[List, List, List], Tensor]: The final tensor ([batch, pos, n_src_nodes, d_model]) stores activation differences, i.e. corrupted - clean activations. The first set of hooks will add in the activations they are run on (run these on corrupted input), while the second set will subtract out the activations they are run on (run these on clean input). The third set of hooks will compute the gradients and update the scores matrix that you passed in. 
+        Tuple[Tuple[List, List, List], Tensor]:
+            The final tensor ([batch, pos, n_src_nodes, d_model]) stores activation differences, i.e. corrupted - clean activations.
+            The first set of hooks will add in the activations they are run on (run these on corrupted input),
+            while the second set will subtract out the activations they are run on (run these on clean input).
+            The third set of hooks will compute the gradients and update the scores matrix that you passed in. 
     """
     separate_activations = model.cfg.use_normalization_before_and_after and scores is None
     if separate_activations:
-        activation_difference = torch.zeros((2, batch_size, n_pos, graph.n_forward, model.cfg.d_model), device=model.cfg.device, dtype=model.cfg.dtype)
+        activation_difference = torch.zeros(
+            (2, batch_size, n_pos, graph.n_forward, model.cfg.d_model),
+            device=model.cfg.device,
+            dtype=model.cfg.dtype,
+        )
     else:
-        activation_difference = torch.zeros((batch_size, n_pos, graph.n_forward, model.cfg.d_model), device=model.cfg.device, dtype=model.cfg.dtype)
+        activation_difference = torch.zeros(
+            (batch_size, n_pos, graph.n_forward, model.cfg.d_model),
+            device=model.cfg.device,
+            dtype=model.cfg.dtype,
+        )
 
 
     fwd_hooks_clean = []
     fwd_hooks_corrupted = []
     bwd_hooks = []
-        
+
     # Fills up the activation difference matrix. In the default case (not separate_activations), 
     # we add in the corrupted activations (add = True) and subtract out the clean ones (add=False)
-    # In the separate_activations case, we just store them in two halves of the matrix. Less efficient, 
+    # In the separate_activations case, we just store them in two halves of the matrix.
+    # Less efficient, 
     # but necessary for models with Gemma's architecture.
     def activation_hook(index, activations, hook, add:bool=True):
         acts = activations.detach()
@@ -83,8 +100,10 @@ def make_hooks_and_matrices(model: HookedTransformer, graph: Graph, batch_size:i
         except RuntimeError as e:
             print(hook.name, activation_difference[:, :, index].size(), acts.size())
             raise e
-    
-    def gradient_hook(prev_index: int, bwd_index: Union[slice, int], gradients:torch.Tensor, hook):
+
+    def gradient_hook(
+        prev_index: int, bwd_index: Union[slice, int], gradients:torch.Tensor, hook, keep_pos_dim:bool=False,
+    ):
         """Takes in a gradient and uses it and activation_difference 
         to compute an update to the score matrix
 
@@ -93,25 +112,33 @@ def make_hooks_and_matrices(model: HookedTransformer, graph: Graph, batch_size:i
             bwd_index (Union[slice, int]): The backward index of the (dst) node
             gradients (torch.Tensor): The gradients of this backward pass 
             hook (_type_): (unused)
+            keep_pos_dim (bool):
+                Whether to keep the position dimension (True) or sum over all positions (False, default)
 
         """
         grads = gradients.detach()
         try:
             if grads.ndim == 3:
                 grads = grads.unsqueeze(2)
-            s = einsum(activation_difference[:, :, :prev_index], grads,'batch pos forward hidden, batch pos backward hidden -> forward backward')
+            s = einsum(
+                activation_difference[:, :, :prev_index],
+                grads,
+                f'batch pos forward hidden, batch pos backward hidden ->{" pos" if keep_pos_dim else ""} forward backward'
+            )
             s = s.squeeze(1)
-            scores[:prev_index, bwd_index] += s
+            scores[...,:prev_index, bwd_index] += s #(pos) n_forward n_backward
         except RuntimeError as e:
-            print(hook.name, activation_difference.size(), activation_difference.device, grads.size(), grads.device)
+            print(
+                hook.name, activation_difference.size(), activation_difference.device, grads.size(), grads.device
+            )
             print(prev_index, bwd_index, scores.size(), s.size())
             raise e
-    
+
     node = graph.nodes['input']
     fwd_index = graph.forward_index(node)
     fwd_hooks_corrupted.append((node.out_hook, partial(activation_hook, fwd_index)))
     fwd_hooks_clean.append((node.out_hook, partial(activation_hook, fwd_index, add=False)))
-    
+
     for layer in range(graph.cfg['n_layers']):
         node = graph.nodes[f'a{layer}.h0']
         fwd_index = graph.forward_index(node)
@@ -120,7 +147,13 @@ def make_hooks_and_matrices(model: HookedTransformer, graph: Graph, batch_size:i
         prev_index = graph.prev_index(node)
         for i, letter in enumerate('qkv'):
             bwd_index = graph.backward_index(node, qkv=letter)
-            bwd_hooks.append((node.qkv_inputs[i], partial(gradient_hook, prev_index, bwd_index)))
+            bwd_hooks.append((
+                node.qkv_inputs[i],
+                partial(
+                    gradient_hook,
+                    prev_index=prev_index, bwd_index=bwd_index, keep_pos_dim=keep_pos_dim,
+                )
+            ))
 
         node = graph.nodes[f'm{layer}']
         fwd_index = graph.forward_index(node)
@@ -128,13 +161,25 @@ def make_hooks_and_matrices(model: HookedTransformer, graph: Graph, batch_size:i
         prev_index = graph.prev_index(node)
         fwd_hooks_corrupted.append((node.out_hook, partial(activation_hook, fwd_index)))
         fwd_hooks_clean.append((node.out_hook, partial(activation_hook, fwd_index, add=False)))
-        bwd_hooks.append((node.in_hook, partial(gradient_hook, prev_index, bwd_index)))
-        
+        bwd_hooks.append((
+            node.in_hook,
+            partial(
+                gradient_hook,
+                prev_index=prev_index, bwd_index=bwd_index, keep_pos_dim=keep_pos_dim,
+            )
+        ))
+
     node = graph.nodes['logits']
     prev_index = graph.prev_index(node)
     bwd_index = graph.backward_index(node)
-    bwd_hooks.append((node.in_hook, partial(gradient_hook, prev_index, bwd_index)))
-            
+    bwd_hooks.append((
+        node.in_hook,
+        partial(
+            gradient_hook,
+            prev_index=prev_index, bwd_index=bwd_index, keep_pos_dim=keep_pos_dim,
+        )
+    ))
+
     return (fwd_hooks_corrupted, fwd_hooks_clean, bwd_hooks), activation_difference
 
 

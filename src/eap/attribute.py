@@ -41,9 +41,14 @@ def get_scores_exact(model: HookedTransformer, graph: Graph, dataloader:DataLoad
     return graph.scores
 
 
-def get_scores_eap(model: HookedTransformer, graph: Graph, dataloader:DataLoader, metric: Callable[[Tensor], Tensor], 
-                   intervention: Literal['patching', 'zero', 'mean','mean-positional']='patching', 
-                   intervention_dataloader: Optional[DataLoader]=None, quiet=False):
+def get_scores_eap(
+    model: HookedTransformer, graph: Graph, metric: Callable[[Tensor], Tensor],
+    dataloader:DataLoader,
+    intervention_dataloader: Optional[DataLoader]=None,
+    intervention: Literal['patching', 'zero', 'mean','mean-positional']='patching',
+    quiet=False,
+    keep_pos_dim:bool=False,
+):
     """Gets edge attribution scores using EAP.
 
     Args:
@@ -56,26 +61,41 @@ def get_scores_eap(model: HookedTransformer, graph: Graph, dataloader:DataLoader
     Returns:
         Tensor: a [src_nodes, dst_nodes] tensor of scores for each edge
     """
-    scores = torch.zeros((graph.n_forward, graph.n_backward), device='cuda', dtype=model.cfg.dtype)    
+    if keep_pos_dim:
+        assert len(dataloader)==1, "positional is currently only implemented for single input"
+        clean, corrupted, label = next(iter(dataloader))
+        clean_tokens, attention_mask, input_lengths, n_pos = tokenize_plus(model, clean)
+        scores_shape = (n_pos, graph.n_forward, graph.n_backward)
+    else:
+        scores_shape = (graph.n_forward, graph.n_backward)
+
+    scores = torch.zeros(scores_shape, device='cuda', dtype=model.cfg.dtype)
 
     if 'mean' in intervention:
         assert intervention_dataloader is not None, "Intervention dataloader must be provided for mean interventions"
         per_position = 'positional' in intervention
-        means = compute_mean_activations(model, graph, intervention_dataloader, per_position=per_position)
+        means = compute_mean_activations(
+            model, graph, intervention_dataloader, per_position=per_position
+        )
         means = means.unsqueeze(0)
         if not per_position:
             means = means.unsqueeze(0)
 
-    
+
     total_items = 0
     dataloader = dataloader if quiet else tqdm(dataloader)
     for clean, corrupted, label in dataloader:
         batch_size = len(clean)
         total_items += batch_size
+        #if positional is True, the following line is currently redundant,
+        # but this may change in the future
         clean_tokens, attention_mask, input_lengths, n_pos = tokenize_plus(model, clean)
         corrupted_tokens, _, _, _ = tokenize_plus(model, corrupted)
 
-        (fwd_hooks_corrupted, fwd_hooks_clean, bwd_hooks), activation_difference = make_hooks_and_matrices(model, graph, batch_size, n_pos, scores)
+        #activation_difference (almost) doesn't appear explicitly later on, but it's necessary for the hooks to work
+        (fwd_hooks_corrupted, fwd_hooks_clean, bwd_hooks), activation_difference = make_hooks_and_matrices(
+            model, graph, batch_size, n_pos, scores, keep_pos_dim=keep_pos_dim,
+        )
 
         with torch.inference_mode():
             if intervention == 'patching':
