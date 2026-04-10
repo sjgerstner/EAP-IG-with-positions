@@ -40,15 +40,16 @@ def get_scores_exact(model: HookedTransformer, graph: Graph, dataloader:DataLoad
     # This is just to make the return type the same as all of the others; we've actually already updated the score matrix
     return graph.scores
 
-#TODO: new intervention keyword for "self-defined corrupted activations"
 #TODO modify the other functions too (for position-sensitive circuits and self-defined corrupted activations)
+#TODO all changes here should also be done in attribute
 def get_scores_eap(
     model: HookedTransformer, graph: Graph, metric: Callable[[Tensor], Tensor],
     dataloader:DataLoader,
+    intervention: Literal['patching', 'zero', 'mean','mean-positional', 'custom']='patching',
     intervention_dataloader: Optional[DataLoader]=None,
-    intervention: Literal['patching', 'zero', 'mean','mean-positional']='patching',
+    alternative_activations: Optional[Tensor]=None,#shape (n_pos, graph.n_forward, model.cfg.d_model)
     quiet=False,
-    keep_pos_dim:bool=False,
+    keep_pos_dims:bool=False,
 ):
     """Gets edge attribution scores using EAP.
 
@@ -58,11 +59,17 @@ def get_scores_eap(
         dataloader (DataLoader): The data over which to attribute
         metric (Callable[[Tensor], Tensor]): metric to attribute with respect to
         quiet (bool, optional): suppress tqdm output. Defaults to False.
+        intervention
+        intervention_dataloader
+        alternative_activations (Optional[Tensor]): Tensor of alternative activations to patch in.
+            Only used if intervention=='custom'.
+            Shape (n_pos, graph.n_forward, model.cfg.d_model), or None (default).
+        keep_pos_dims
 
     Returns:
         Tensor: a [src_nodes, dst_nodes] tensor of scores for each edge
     """
-    if keep_pos_dim:
+    if keep_pos_dims:
         assert len(dataloader)==1, "positional is currently only implemented for single input"
         clean, corrupted, label = next(iter(dataloader))
         clean_tokens, attention_mask, input_lengths, n_pos = tokenize_plus(model, clean)
@@ -81,7 +88,9 @@ def get_scores_eap(
         means = means.unsqueeze(0)
         if not per_position:
             means = means.unsqueeze(0)
-
+    elif intervention=='custom':
+        assert alternative_activations is not None, "Need to provide custom activations for custom intervention"
+        means = alternative_activations
 
     total_items = 0
     dataloader = dataloader if quiet else tqdm(dataloader)
@@ -95,7 +104,7 @@ def get_scores_eap(
 
         #activation_difference (almost) doesn't appear explicitly later on, but it's necessary for the hooks to work
         (fwd_hooks_corrupted, fwd_hooks_clean, bwd_hooks), activation_difference = make_hooks_and_matrices(
-            model, graph, batch_size, n_pos, scores, keep_pos_dims=keep_pos_dim,
+            model, graph, batch_size, n_pos, scores, keep_pos_dims=keep_pos_dims,
         )
 
         with torch.inference_mode():
@@ -103,7 +112,7 @@ def get_scores_eap(
                 # We intervene by subtracting out clean and adding in corrupted activations
                 with model.hooks(fwd_hooks_corrupted):
                     _ = model(corrupted_tokens, attention_mask=attention_mask)
-            elif 'mean' in intervention:
+            elif 'mean' in intervention or intervention=='custom':
                 # In the case of zero or mean ablation, we skip the adding in corrupted activations
                 # but in mean ablations, we need to add the mean in
                 activation_difference += means
