@@ -204,7 +204,7 @@ class Graph:
     edges: Dict[str, Edge]  # Maps from edge names ('input->a0.h0', 'a0.h0->m0', etc.) to Edge objects. Attn edges are denoted as 'input->a0.h0<q>', 'input->a0.h0<k>', 'input->a0.h0<v>'
     n_forward: int  # the number of forward (source) nodes
     n_backward: int  # the number of backward (destination) nodes
-    scores: torch.Tensor  # (n_forward, n_backward) tensor of edge scores
+    scores: torch.Tensor  # tensor of edge scores, either (n_forward, n_backward) if position insensitive or (n_pos, n_pos, n_forward, n_backward)
     in_graph: torch.Tensor  # (n_forward, n_backward) tensor of whether the edge is in the graph
     neurons_scores: Optional[torch.Tensor]  # (n_forward, d_model) tensor of neuron scores for each forward node. If a neuron's score is NaN, this indicates it has not been scored, and needs to stay in the graph.
     neurons_in_graph: Optional[torch.Tensor]  # (n_forward, d_model) tensor of whether the neuron is in the graph
@@ -600,7 +600,10 @@ class Graph:
             
 
     @classmethod
-    def from_model(cls, model_or_config: Union[HookedTransformer,HookedTransformerConfig, Dict], neuron_level: bool = False, node_scores: bool = False) -> 'Graph':
+    def from_model(
+        cls, model_or_config: Union[HookedTransformer,HookedTransformerConfig, Dict], neuron_level: bool = False, node_scores: bool = False,
+        n_pos:int=0,
+    ) -> 'Graph':
         """Instantiate a Graph object from a HookedTransformer or HookedTransformerConfig object, or a similar Dict. The neuron_level parameter determines whether the graph should be neuron-level or not, while the node_scores parameter determines whether the graph should have node scores or not. If you don't have scores for all nodes / neurons, just don't set them (default is torch.nan). Any node/neuron without a real score will always be kept in the graph when doing node/neuron-level topn (but might be eliminated by another level's topn, e.g. a node with no neuron scores might be removed if it loses all edges)
 
         Args:
@@ -630,8 +633,8 @@ class Graph:
         graph.n_forward = 1 + graph.cfg['n_layers'] * (graph.cfg['n_heads'] + 1)
         graph.n_backward = graph.cfg['n_layers'] * (3 * graph.cfg['n_heads'] + 1) + 1
         graph.forward_to_backward = torch.zeros((graph.n_forward, graph.n_backward)).bool()
-        
-        graph.scores = torch.zeros((graph.n_forward, graph.n_backward))
+
+        graph.scores = torch.zeros((graph.n_forward, graph.n_backward)) if n_pos==0 else torch.zeros((graph.n_forward, graph.n_backward))
         graph.real_edge_mask = torch.zeros((graph.n_forward, graph.n_backward)).bool()
         graph.in_graph = torch.zeros((graph.n_forward, graph.n_backward)).bool()
         graph.nodes_in_graph = torch.zeros(graph.n_forward).bool()
