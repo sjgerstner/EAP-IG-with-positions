@@ -45,9 +45,13 @@ def get_scores_exact(model: HookedTransformer, graph: Graph, dataloader:DataLoad
 def get_scores_eap(
     model: HookedTransformer, graph: Graph, metric: Callable[[Tensor], Tensor],
     dataloader:DataLoader,
-    intervention: Literal['patching', 'zero', 'mean','mean-positional', 'custom']='patching',
+    intervention: Literal[
+        'patching', 'zero', 'mean','mean-positional',
+        #'custom'
+        ]='patching',
     intervention_dataloader: Optional[DataLoader]=None,
-    alternative_activations: Optional[Tensor]=None,#shape (n_pos, graph.n_forward, model.cfg.d_model)
+    #alternative_activations: Optional[Tensor]=None,#shape (n_pos, graph.n_forward, model.cfg.d_model)
+    corruption_hooks: Optional[list]=None,
     quiet=False,
     keep_pos_dims:bool=False,
 ):
@@ -61,9 +65,8 @@ def get_scores_eap(
         quiet (bool, optional): suppress tqdm output. Defaults to False.
         intervention
         intervention_dataloader
-        alternative_activations (Optional[Tensor]): Tensor of alternative activations to patch in.
-            Only used if intervention=='custom'.
-            Shape (n_pos, graph.n_forward, model.cfg.d_model), or None (default).
+        corruption_hooks (list of hooks, optional): apply these hooks to the corrupted run
+            (useful to trace the effect of these corruptions)
         keep_pos_dims
 
     Returns:
@@ -77,7 +80,7 @@ def get_scores_eap(
     else:
         scores_shape = (graph.n_forward, graph.n_backward)
 
-    scores = torch.zeros(scores_shape, device='cuda', dtype=model.cfg.dtype)
+    scores = torch.zeros(scores_shape, device=model.cfg.device, dtype=model.cfg.dtype)
 
     if 'mean' in intervention:
         assert intervention_dataloader is not None, "Intervention dataloader must be provided for mean interventions"
@@ -88,9 +91,9 @@ def get_scores_eap(
         means = means.unsqueeze(0)
         if not per_position:
             means = means.unsqueeze(0)
-    elif intervention=='custom':
-        assert alternative_activations is not None, "Need to provide custom activations for custom intervention"
-        means = alternative_activations
+    # elif intervention=='custom':
+    #     assert alternative_activations is not None, "Need to provide custom activations for custom intervention"
+    #     means = alternative_activations
 
     total_items = 0
     dataloader = dataloader if quiet else tqdm(dataloader)
@@ -106,13 +109,16 @@ def get_scores_eap(
         (fwd_hooks_corrupted, fwd_hooks_clean, bwd_hooks), activation_difference = make_hooks_and_matrices(
             model, graph, batch_size, n_pos, scores, keep_pos_dims=keep_pos_dims,
         )
+        if corruption_hooks:
+            fwd_hooks_corrupted_new = corruption_hooks + fwd_hooks_corrupted
+            fwd_hooks_corrupted = fwd_hooks_corrupted_new
 
         with torch.inference_mode():
             if intervention == 'patching':
                 # We intervene by subtracting out clean and adding in corrupted activations
                 with model.hooks(fwd_hooks_corrupted):
                     _ = model(corrupted_tokens, attention_mask=attention_mask)
-            elif 'mean' in intervention or intervention=='custom':
+            elif 'mean' in intervention:# or intervention=='custom':
                 # In the case of zero or mean ablation, we skip the adding in corrupted activations
                 # but in mean ablations, we need to add the mean in
                 activation_difference += means
