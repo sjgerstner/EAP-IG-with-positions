@@ -399,6 +399,8 @@ class Graph:
                 self.neurons_in_graph *= False
             if self.positional_edges_in_graph is not None:
                 self.positional_edges_in_graph *= False
+            if self.positional_nodes_in_graph is not None:
+                self.positional_nodes_in_graph *= False
         else:
             self.nodes_in_graph[:] = True
             self.in_graph[:] = True
@@ -407,6 +409,8 @@ class Graph:
                 self.neurons_in_graph[:] = True
             if self.positional_edges_in_graph is not None:
                 self.positional_edges_in_graph[:] = True
+            if self.positional_nodes_in_graph is not None:
+                self.positional_nodes_in_graph[:] = True
 
     def apply_threshold(
         self,
