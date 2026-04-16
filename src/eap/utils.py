@@ -124,7 +124,7 @@ def make_hooks_and_matrices(
             s = einsum(
                 activation_difference[:, :, :prev_index],
                 grads,
-                f'batch pos1 forward hidden, batch pos2 backward hidden ->{" pos1 pos2" if keep_pos_dims else ""} forward backward'
+                f'batch pos forward hidden, batch pos backward hidden ->{" pos" if keep_pos_dims else ""} forward backward'
             )
             s = s.squeeze(-1) #backward dimension is singleton
             scores[...,:prev_index, bwd_index] += s #(pos) n_forward n_backward

@@ -77,7 +77,7 @@ def get_scores_eap(
         assert len(dataloader)==1, "positional is currently only implemented for single input"
         clean, corrupted, label = next(iter(dataloader))
         clean_tokens, attention_mask, input_lengths, n_pos = tokenize_plus(model, clean)
-        scores_shape = (n_pos, n_pos, graph.n_forward, graph.n_backward)
+        scores_shape = (n_pos, graph.n_forward, graph.n_backward)
     else:
         scores_shape = (graph.n_forward, graph.n_backward)
 
