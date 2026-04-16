@@ -498,6 +498,8 @@ def attribute(
 
     if aggregation == 'mean':
         scores /= model.cfg.d_model
-        
-    graph.scores[:] =  scores.to(graph.scores.device)
 
+    if kwargs["keep_pos_dims"]:
+        graph.positional_scores = scores.to(graph.scores.device)
+    else:
+        graph.scores[:] =  scores.to(graph.scores.device)
