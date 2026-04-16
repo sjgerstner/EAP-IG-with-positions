@@ -2,7 +2,7 @@ from typing import List, Dict, Union, Tuple, Literal, Optional, Set
 import json
 import heapq
 
-from einops import einsum
+from einops import einsum, reduce
 import torch
 from transformer_lens import HookedTransformer, HookedTransformerConfig
 import numpy as np
@@ -232,7 +232,9 @@ class Graph:
     neurons_in_graph: Optional[torch.Tensor]  # (n_forward, d_model) tensor of whether the neuron is in the graph
     nodes_scores: Optional[torch.Tensor]  # (n_forward) tensor of source node scores. If None, nodes have no scores. If a node's score is NaN, this indicates it has not been scored, and needs to stay in the graph.
     nodes_in_graph: torch.Tensor  # (n_forward) tensor of whether the (source) node is in the graph
-    positional_scores: Optional[torch.Tensor] #(n_pos, n_forward)
+    positional_scores: Optional[torch.Tensor] #(n_pos, n_forward, n_backward)
+    positional_edges_in_graph: Optional[torch.Tensor] #(n_pos, n_forward, n_backward)
+    positional_nodes_in_graph: Optional[torch.Tensor] #(n_pos, n_forward)
     forward_to_backward: torch.Tensor
     real_edge_mask: torch.Tensor   # (n_forward, n_backward) tensor of whether the edge is real (some edges are not real, e.g. m10->m2)
     cfg: GraphConfig
@@ -395,12 +397,16 @@ class Graph:
             self.in_graph *= False
             if self.neurons_in_graph is not None:
                 self.neurons_in_graph *= False
+            if self.positional_edges_in_graph is not None:
+                self.positional_edges_in_graph *= False
         else:
             self.nodes_in_graph[:] = True
             self.in_graph[:] = True
             self.in_graph &= self.real_edge_mask
             if self.neurons_in_graph is not None:
                 self.neurons_in_graph[:] = True
+            if self.positional_edges_in_graph is not None:
+                self.positional_edges_in_graph[:] = True
 
     def apply_threshold(
         self,
@@ -408,15 +414,18 @@ class Graph:
         absolute: bool=True,
         reset: bool=True,
         level:Literal['edge','node','neuron']='edge',
+        positional: bool=False,
         prune=True,
         **prune_kwargs,
     ):
-        """Apply a threshold to the graph, setting the in_graph attribute of edges/nodes/neurons to True if the score is above the threshold. If a node or neuron has no score, it's assumed to always be in the graph.
+        """Apply a threshold to the graph, setting the in_graph attribute of edges/nodes/neurons to True if the score is above the threshold.
+        If a node or neuron has no score, it's assumed to always be in the graph.
         
         Args:
             threshold (float): the threshold to apply
             absolute (bool): whether to take the absolute value of the scores before applying the threshold
-            reset (bool): resets the graph, setting everything to zero, before applying topn. Only if reset=True will corresponding outgoing edges be added after neuron and node topn
+            reset (bool): resets the graph, setting everything to zero, before applying topn.
+                Only if reset=True will corresponding outgoing edges be added after neuron and node topn
             level (str, optional): level at which to apply topn. Defaults to 'edge'.
             prune (bool): whether to prune the graph after applying topn"""
 
@@ -425,6 +434,8 @@ class Graph:
             self.reset()
 
         if level == 'neuron':
+            if positional:
+                raise NotImplementedError("positional is currently only implemented for edge-level circuits")
             unscored_neurons = torch.isnan(self.neurons_scores)
             neuron_score_copy = self.neurons_scores.clone()
             if absolute:
@@ -442,6 +453,8 @@ class Graph:
                 self.in_graph += self.nodes_in_graph.view(-1, 1)
 
         elif level == 'node':
+            if positional:
+                raise NotImplementedError("positional is currently only implemented for edge-level circuits")
             unscored_nodes =  torch.isnan(self.nodes_scores)
             
             node_score_copy = self.nodes_scores.clone()
@@ -458,21 +471,38 @@ class Graph:
                 self.in_graph += self.nodes_in_graph.view(-1, 1)
 
         elif level == 'edge':
-            edge_scores = self.scores.clone()
+            if positional:
+                assert self.positional_scores is not None, "You haven't computed positional scores yet!"
+                edge_scores = self.positional_scores.clone()
+            else:
+                edge_scores = self.scores.clone()
+
             if absolute:
                 edge_scores = torch.abs(edge_scores)
-            
+
             # masking out the edges that are not real
-            edge_scores[~self.real_edge_mask] = -torch.inf 
-            
-            surpass_threshold = edge_scores >= threshold
-            self.in_graph[:] = surpass_threshold
-            
+            edge_scores[...,~self.real_edge_mask] = -torch.inf
+
+            surpass_threshold = edge_scores >= threshold #(pos) forward backward
+            if positional:
+                self.positional_edges_in_graph = surpass_threshold.to(self.in_graph.device)
+            else:
+                self.in_graph[:] = surpass_threshold
+
             if reset:
-                nodes_with_outgoing = self.in_graph.any(dim=1)
-                nodes_with_ingoing = einsum(self.in_graph.any(dim=0).float(), self.forward_to_backward.float(), 'backward, forward backward -> forward') > 0
+                positional_nodes_with_outgoing = surpass_threshold.any(dim=-1) #(pos) forward
+                positional_nodes_with_ingoing = einsum(
+                    surpass_threshold.any(dim=-2).float(),#(pos) backward
+                    self.forward_to_backward.float(),
+                    '... backward, forward backward -> ... forward'
+                ) > 0
+                nodes_with_outgoing = reduce(positional_nodes_with_outgoing, '... forward -> forward', 'max')
+                nodes_with_ingoing = reduce(positional_nodes_with_ingoing, '... forward -> forward', 'max')
                 nodes_with_ingoing[0] = True
                 self.nodes_in_graph += nodes_with_outgoing & nodes_with_ingoing
+                if positional:
+                    positional_nodes_with_ingoing[...,0] = True
+                    self.positional_nodes_in_graph = positional_nodes_with_outgoing & positional_nodes_with_ingoing
         else:
             raise ValueError(f"Invalid level: {level}")
 
@@ -603,41 +633,65 @@ class Graph:
             self.prune(**prune_kwargs)
 
 
-    def prune(self, prune_childless:bool=True, prune_parentless:bool=True):
-        """Converts a potentially messy Graph into one that is fully connected. The number of components after this is done is strictly non-increasing; it may remove nodes or edges from the graph, but it won't add them. This function first removes nodes with no neurons (if applicable). Then, it repeatedly removes nodes that lack incoming or outgoing edges (or both), and then edges missing a parent or child. Finally, it pruned the neurons of any removed nodes.
+    def prune(self, prune_childless:bool=True, prune_parentless:bool=True, positional:bool=False):
+        """Converts a potentially messy Graph into one that is fully connected.
+        The number of components after this is done is strictly non-increasing; it may remove nodes or edges from the graph, but it won't add them.
+        This function first removes nodes with no neurons (if applicable).
+        Then, it repeatedly removes nodes that lack incoming or outgoing edges (or both),
+        and then edges missing a parent or child.
+        Finally, it pruned the neurons of any removed nodes.
         """
-        
+
         # remove neuronless nodes
         if self.neurons_in_graph is not None:
             self.nodes_in_graph *= self.neurons_in_graph.any(dim=1)
-        
+
         old_new_same = False
         # Could take twice as many iterations as there are layers! But will probably not
         while not old_new_same:
-            # remove nodes with 0 incoming or outgoing edges
-            nodes_to_keep = self.nodes_in_graph.clone()
-            if prune_childless:
+            if positional:
+                nodes_to_keep = self.positional_nodes_in_graph.clone()
+            else:
+                nodes_to_keep = self.nodes_in_graph.clone()
+
+            if prune_childless:#remove nodes with 0 outgoing edges
                 nodes_with_outgoing = self.in_graph.any(dim=1)
                 nodes_to_keep &= nodes_with_outgoing
-            if prune_parentless:
+            if prune_parentless:#remove nodes with 0 incoming edges
                 nodes_with_ingoing = einsum(self.in_graph.any(dim=0).float(), self.forward_to_backward.float(), 'backward, forward backward -> forward') > 0
                 nodes_with_ingoing[0] = True  # input node always treated as if it has incoming edges
                 nodes_to_keep &= nodes_with_ingoing
-            old_nodes_in_graph = self.nodes_in_graph.clone()
-            self.nodes_in_graph[:] = nodes_to_keep
-            
+
+            if positional:
+                old_nodes_in_graph = self.positional_nodes_in_graph.clone()
+                self.positional_nodes_in_graph = nodes_to_keep
+            else:
+                old_nodes_in_graph = self.nodes_in_graph.clone()
+                self.nodes_in_graph[:] = nodes_to_keep
+
             # remove edges with missing parents or children
-            forward_in_graph = self.nodes_in_graph.float()
-            backward_in_graph = (self.nodes_in_graph.float() @ self.forward_to_backward.float())
-            backward_in_graph[-1] = 1  # logits node is always present
-            edge_remask = einsum(forward_in_graph, backward_in_graph, 'forward, backward -> forward backward') > 0
-            old_edges_in_graph = self.in_graph.clone()
-            self.in_graph *= edge_remask
-            old_new_same = (
-                torch.all(old_nodes_in_graph == self.nodes_in_graph) and
-                torch.all(old_edges_in_graph == self.in_graph)
-            )
-            
+            if positional:
+                forward_in_graph = self.positional_nodes_in_graph.float()
+            else:
+                forward_in_graph = self.nodes_in_graph.float()
+            backward_in_graph = (forward_in_graph @ self.forward_to_backward.float())
+            backward_in_graph[...,-1] = 1  # logits node is always present
+            edge_remask = einsum(forward_in_graph, backward_in_graph, '... forward, ... backward -> ... forward backward') > 0
+            if positional:
+                old_edges_in_graph = self.positional_edges_in_graph.clone()
+                self.positional_edges_in_graph *= edge_remask
+                old_new_same = (
+                    torch.all(old_nodes_in_graph == self.positonal_nodes_in_graph) and
+                    torch.all(old_edges_in_graph == self.positional_edges_in_graph)
+                )
+            else:
+                old_edges_in_graph = self.in_graph.clone()
+                self.in_graph *= edge_remask
+                old_new_same = (
+                    torch.all(old_nodes_in_graph == self.nodes_in_graph) and
+                    torch.all(old_edges_in_graph == self.in_graph)
+                )
+
         # remove neurons from nodes not in the graph
         if self.neurons_in_graph is not None:
                 self.neurons_in_graph *= self.nodes_in_graph.view(-1, 1)
@@ -697,6 +751,9 @@ class Graph:
         graph.nodes_in_graph = torch.zeros(graph.n_forward).bool()# if n_pos==0
             #else torch.zeros((n_pos, graph.n_forward))
         #)
+        graph.positional_scores = None
+        graph.positional_edges_in_graph = None
+        graph.positional_nodes_in_graph = None
         if node_scores:
             graph.nodes_scores = torch.zeros_like(graph.nodes_in_graph)
             graph.nodes_scores[:] = torch.nan
