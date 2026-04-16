@@ -126,7 +126,7 @@ def make_hooks_and_matrices(
                 grads,
                 f'batch pos1 forward hidden, batch pos2 backward hidden ->{" pos1 pos2" if keep_pos_dims else ""} forward backward'
             )
-            s = s.squeeze(1)
+            s = s.squeeze(-1) #backward dimension is singleton
             scores[...,:prev_index, bwd_index] += s #(pos) n_forward n_backward
         except RuntimeError as e:
             print(
@@ -146,13 +146,14 @@ def make_hooks_and_matrices(
         fwd_hooks_corrupted.append((node.out_hook, partial(activation_hook, fwd_index)))
         fwd_hooks_clean.append((node.out_hook, partial(activation_hook, fwd_index, add=False)))
         prev_index = graph.prev_index(node)
+        # assert isinstance(prev_index, int)
         for i, letter in enumerate('qkv'):
             bwd_index = graph.backward_index(node, qkv=letter)
             bwd_hooks.append((
                 node.qkv_inputs[i],
                 partial(
                     gradient_hook,
-                    prev_index=prev_index, bwd_index=bwd_index, keep_pos_dims=keep_pos_dims,
+                    prev_index, bwd_index, keep_pos_dims=keep_pos_dims,
                 )
             ))
 
@@ -160,24 +161,26 @@ def make_hooks_and_matrices(
         fwd_index = graph.forward_index(node)
         bwd_index = graph.backward_index(node)
         prev_index = graph.prev_index(node)
+        # assert isinstance(prev_index, int)
         fwd_hooks_corrupted.append((node.out_hook, partial(activation_hook, fwd_index)))
         fwd_hooks_clean.append((node.out_hook, partial(activation_hook, fwd_index, add=False)))
         bwd_hooks.append((
             node.in_hook,
             partial(
                 gradient_hook,
-                prev_index=prev_index, bwd_index=bwd_index, keep_pos_dims=keep_pos_dims,
+                prev_index, bwd_index, keep_pos_dims=keep_pos_dims,
             )
         ))
 
     node = graph.nodes['logits']
     prev_index = graph.prev_index(node)
+    # assert isinstance(prev_index, int)
     bwd_index = graph.backward_index(node)
     bwd_hooks.append((
         node.in_hook,
         partial(
             gradient_hook,
-            prev_index=prev_index, bwd_index=bwd_index, keep_pos_dims=keep_pos_dims,
+            prev_index, bwd_index, keep_pos_dims=keep_pos_dims,
         )
     ))
 
@@ -252,3 +255,11 @@ def compute_mean_activations(model: HookedTransformer, graph: Graph, dataloader:
     means = means.squeeze(0)
     means /= total
     return means if per_position else means.mean(0)
+
+#copied from the greater_than notebook, useful for all metrics
+def get_logit_positions(logits: torch.Tensor, input_length: torch.Tensor):
+    batch_size = logits.size(0)
+    idx = torch.arange(batch_size, device=logits.device)
+
+    logits = logits[idx, input_length - 1]
+    return logits

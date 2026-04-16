@@ -40,15 +40,21 @@ def get_scores_exact(model: HookedTransformer, graph: Graph, dataloader:DataLoad
     # This is just to make the return type the same as all of the others; we've actually already updated the score matrix
     return graph.scores
 
-#TODO: new intervention keyword for "self-defined corrupted activations"
 #TODO modify the other functions too (for position-sensitive circuits and self-defined corrupted activations)
+#TODO all changes here should also be done in attribute
 def get_scores_eap(
-    model: HookedTransformer, graph: Graph, metric: Callable[[Tensor], Tensor],
+    model: HookedTransformer, graph: Graph,
     dataloader:DataLoader,
+    metric: Callable[[Tensor], Tensor],
+    intervention: Literal[
+        'patching', 'zero', 'mean','mean-positional',
+        #'custom'
+        ]='patching',
     intervention_dataloader: Optional[DataLoader]=None,
-    intervention: Literal['patching', 'zero', 'mean','mean-positional']='patching',
+    #alternative_activations: Optional[Tensor]=None,#shape (n_pos, graph.n_forward, model.cfg.d_model)
+    corruption_hooks: Optional[list]=None,
     quiet=False,
-    keep_pos_dim:bool=False,
+    keep_pos_dims:bool=False,
 ):
     """Gets edge attribution scores using EAP.
 
@@ -58,11 +64,16 @@ def get_scores_eap(
         dataloader (DataLoader): The data over which to attribute
         metric (Callable[[Tensor], Tensor]): metric to attribute with respect to
         quiet (bool, optional): suppress tqdm output. Defaults to False.
+        intervention
+        intervention_dataloader
+        corruption_hooks (list of hooks, optional): apply these hooks to the corrupted run
+            (useful to trace the effect of these corruptions)
+        keep_pos_dims
 
     Returns:
         Tensor: a [src_nodes, dst_nodes] tensor of scores for each edge
     """
-    if keep_pos_dim:
+    if keep_pos_dims:
         assert len(dataloader)==1, "positional is currently only implemented for single input"
         clean, corrupted, label = next(iter(dataloader))
         clean_tokens, attention_mask, input_lengths, n_pos = tokenize_plus(model, clean)
@@ -70,7 +81,7 @@ def get_scores_eap(
     else:
         scores_shape = (graph.n_forward, graph.n_backward)
 
-    scores = torch.zeros(scores_shape, device='cuda', dtype=model.cfg.dtype)
+    scores = torch.zeros(scores_shape, device=model.cfg.device, dtype=model.cfg.dtype)
 
     if 'mean' in intervention:
         assert intervention_dataloader is not None, "Intervention dataloader must be provided for mean interventions"
@@ -81,7 +92,9 @@ def get_scores_eap(
         means = means.unsqueeze(0)
         if not per_position:
             means = means.unsqueeze(0)
-
+    # elif intervention=='custom':
+    #     assert alternative_activations is not None, "Need to provide custom activations for custom intervention"
+    #     means = alternative_activations
 
     total_items = 0
     dataloader = dataloader if quiet else tqdm(dataloader)
@@ -95,15 +108,18 @@ def get_scores_eap(
 
         #activation_difference (almost) doesn't appear explicitly later on, but it's necessary for the hooks to work
         (fwd_hooks_corrupted, fwd_hooks_clean, bwd_hooks), activation_difference = make_hooks_and_matrices(
-            model, graph, batch_size, n_pos, scores, keep_pos_dims=keep_pos_dim,
+            model, graph, batch_size, n_pos, scores, keep_pos_dims=keep_pos_dims,
         )
+        if corruption_hooks:
+            fwd_hooks_corrupted_new = corruption_hooks + fwd_hooks_corrupted
+            fwd_hooks_corrupted = fwd_hooks_corrupted_new
 
         with torch.inference_mode():
             if intervention == 'patching':
                 # We intervene by subtracting out clean and adding in corrupted activations
                 with model.hooks(fwd_hooks_corrupted):
                     _ = model(corrupted_tokens, attention_mask=attention_mask)
-            elif 'mean' in intervention:
+            elif 'mean' in intervention:# or intervention=='custom':
                 # In the case of zero or mean ablation, we skip the adding in corrupted activations
                 # but in mean ablations, we need to add the mean in
                 activation_difference += means
@@ -436,10 +452,13 @@ def get_scores_information_flow_routes(model: HookedTransformer, graph: Graph, d
     return scores
 
 allowed_aggregations = {'sum', 'mean'}    
-def attribute(model: HookedTransformer, graph: Graph, dataloader: DataLoader, metric: Callable[[Tensor], Tensor], 
-              method: Literal['EAP', 'EAP-IG-inputs', 'clean-corrupted', 'EAP-IG-activations', 'information-flow-routes', 'exact'], 
-              intervention: Literal['patching', 'zero', 'mean','mean-positional']='patching', aggregation='sum', 
-              ig_steps: Optional[int]=None, intervention_dataloader: Optional[DataLoader]=None, quiet=False):
+def attribute(
+    model: HookedTransformer, graph: Graph, dataloader: DataLoader, metric: Callable[[Tensor], Tensor], 
+    method: Literal['EAP', 'EAP-IG-inputs', 'clean-corrupted', 'EAP-IG-activations', 'information-flow-routes', 'exact'], 
+    intervention: Literal['patching', 'zero', 'mean','mean-positional']='patching', aggregation='sum', 
+    ig_steps: Optional[int]=None, intervention_dataloader: Optional[DataLoader]=None, quiet=False,
+    **kwargs,              
+):
     assert model.cfg.use_attn_result, "Model must be configured to use attention result (model.cfg.use_attn_result)"
     assert model.cfg.use_split_qkv_input, "Model must be configured to use split qkv inputs (model.cfg.use_split_qkv_input)"
     assert model.cfg.use_hook_mlp_in, "Model must be configured to use hook MLP in (model.cfg.use_hook_mlp_in)"
@@ -452,8 +471,11 @@ def attribute(model: HookedTransformer, graph: Graph, dataloader: DataLoader, me
     # Scores are by default summed across the d_model dimension
     # This means that scores are a [n_src_nodes, n_dst_nodes] tensor
     if method == 'EAP':
-        scores = get_scores_eap(model, graph, dataloader, metric, intervention=intervention, 
-                                intervention_dataloader=intervention_dataloader, quiet=quiet)
+        scores = get_scores_eap(
+            model, graph, dataloader, metric, intervention=intervention, 
+            intervention_dataloader=intervention_dataloader, quiet=quiet,
+            **kwargs,
+        )
     elif method == 'EAP-IG-inputs':
         if intervention != 'patching':
             raise ValueError(f"intervention must be 'patching' for EAP-IG-inputs, but got {intervention}")
