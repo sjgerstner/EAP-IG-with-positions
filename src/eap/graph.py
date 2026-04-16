@@ -371,7 +371,15 @@ class Graph:
             if self.neurons_in_graph is not None:
                 self.neurons_in_graph[:] = True
                 
-    def apply_threshold(self, threshold: float, absolute: bool=True, reset: bool=True, level:Literal['edge','node','neuron']='edge', prune=True):
+    def apply_threshold(
+        self,
+        threshold: float,
+        absolute: bool=True,
+        reset: bool=True,
+        level:Literal['edge','node','neuron']='edge',
+        prune=True,
+        **prune_kwargs,
+    ):
         """Apply a threshold to the graph, setting the in_graph attribute of edges/nodes/neurons to True if the score is above the threshold. If a node or neuron has no score, it's assumed to always be in the graph.
         
         Args:
@@ -438,9 +446,9 @@ class Graph:
             raise ValueError(f"Invalid level: {level}")
         
         if prune:
-            self.prune()
+            self.prune(**prune_kwargs)
     
-    def apply_topn(self, n:int, absolute: bool=True, level:Literal['edge','node','neuron']='edge', reset: bool=True, prune:bool=True):
+    def apply_topn(self, n:int, absolute: bool=True, level:Literal['edge','node','neuron']='edge', reset: bool=True, prune:bool=True, **prune_kwargs):
         """Sets the graph to contain only the top-n components. The components are specified by the level parameter, which can be 'edge','node', or 'neuron'. If 'node', the top-n nodes are selected based on their scores, and all outgoing edges to nodes in the graph are true. If 'edge', the top-n edges are selected based on their scores. If 'neuron', the top-n neurons are selected based on their scores, and all outgoing edges to nodes with neurons in the graph are true.
 
         Args:
@@ -526,9 +534,9 @@ class Graph:
             raise ValueError(f"Invalid level: {level}")
         
         if prune:
-            self.prune()
+            self.prune(**prune_kwargs)
 
-    def apply_greedy(self, n_edges:int, absolute: bool = True, reset:bool = True, prune:bool = True):
+    def apply_greedy(self, n_edges:int, absolute: bool = True, reset:bool = True, prune:bool = True, **prune_kwargs):
         """
         Gets the topn edges of the graph using a greedy algorithm that works from the logits up. Only defined over edges
         
@@ -561,10 +569,10 @@ class Graph:
                 edges = heapq.merge(edges, parent_parent_edges, key = lambda edge: abs_id(edge.score), reverse=True)
         
         if prune:
-            self.prune()
+            self.prune(**prune_kwargs)
         
 
-    def prune(self):
+    def prune(self, prune_childless:bool=True, prune_parentless:bool=True):
         """Converts a potentially messy Graph into one that is fully connected. The number of components after this is done is strictly non-increasing; it may remove nodes or edges from the graph, but it won't add them. This function first removes nodes with no neurons (if applicable). Then, it repeatedly removes nodes that lack incoming or outgoing edges (or both), and then edges missing a parent or child. Finally, it pruned the neurons of any removed nodes.
         """
         
@@ -576,11 +584,16 @@ class Graph:
         # Could take twice as many iterations as there are layers! But will probably not
         while not old_new_same:
             # remove nodes with 0 incoming or outgoing edges
-            nodes_with_outgoing = self.in_graph.any(dim=1)
-            nodes_with_ingoing = einsum(self.in_graph.any(dim=0).float(), self.forward_to_backward.float(), 'backward, forward backward -> forward') > 0
-            nodes_with_ingoing[0] = True  # input node always treated as if it has incoming edges
+            nodes_to_keep = self.nodes_in_graph.clone()
+            if prune_childless:
+                nodes_with_outgoing = self.in_graph.any(dim=1)
+                nodes_to_keep &= nodes_with_outgoing
+            if prune_parentless:
+                nodes_with_ingoing = einsum(self.in_graph.any(dim=0).float(), self.forward_to_backward.float(), 'backward, forward backward -> forward') > 0
+                nodes_with_ingoing[0] = True  # input node always treated as if it has incoming edges
+                nodes_to_keep &= nodes_with_ingoing
             old_nodes_in_graph = self.nodes_in_graph.clone()
-            self.nodes_in_graph[:] = nodes_with_outgoing & nodes_with_ingoing
+            self.nodes_in_graph[:] = nodes_to_keep
             
             # remove edges with missing parents or children
             forward_in_graph = self.nodes_in_graph.float()
