@@ -234,9 +234,11 @@ class Graph:
     nodes_in_graph: torch.Tensor  # (n_forward) tensor of whether the (source) node is in the graph
     positional_scores: Optional[torch.Tensor] #(n_pos, n_forward, n_backward)
     positional_edges_in_graph: Optional[torch.Tensor] #(n_pos, n_forward, n_backward)
-    positional_nodes_in_graph: Optional[torch.Tensor] #(n_pos, n_forward)
+    #positional_nodes_in_graph: Optional[torch.Tensor] #(n_pos, n_forward)
     forward_to_backward: torch.Tensor
     real_edge_mask: torch.Tensor   # (n_forward, n_backward) tensor of whether the edge is real (some edges are not real, e.g. m10->m2)
+    mlp_mask_forward: torch.Tensor # (n_forward) tensor of whether the node is an MLP node
+    mlp_mask_backward: torch.Tensor #(n_backward)
     cfg: GraphConfig
 
     def __init__(self):
@@ -319,10 +321,10 @@ class Graph:
             i =  1 + layer * (cfg.n_heads + 1)
             return slice(i, i + cfg.n_heads) if attn_slice else i + head
         else:
-            raise ValueError(f"Invalid node: {node_name}") 
+            raise ValueError(f"Invalid node: {node_name}")
 
     def forward_index(self, node:Node, attn_slice=True) -> int:
-        return Graph._forward_index(self.cfg, node.name, attn_slice)        
+        return Graph._forward_index(self.cfg, node.name, attn_slice)
 
     @classmethod
     def _backward_index(cls, cfg, node_name:str, qkv=None, attn_slice=False) -> int:
@@ -399,8 +401,8 @@ class Graph:
                 self.neurons_in_graph *= False
             if self.positional_edges_in_graph is not None:
                 self.positional_edges_in_graph *= False
-            if self.positional_nodes_in_graph is not None:
-                self.positional_nodes_in_graph *= False
+            # if self.positional_nodes_in_graph is not None:
+            #     self.positional_nodes_in_graph *= False
         else:
             self.nodes_in_graph[:] = True
             self.in_graph[:] = True
@@ -409,8 +411,8 @@ class Graph:
                 self.neurons_in_graph[:] = True
             if self.positional_edges_in_graph is not None:
                 self.positional_edges_in_graph[:] = True
-            if self.positional_nodes_in_graph is not None:
-                self.positional_nodes_in_graph[:] = True
+            # if self.positional_nodes_in_graph is not None:
+            #     self.positional_nodes_in_graph[:] = True
 
     def apply_threshold(
         self,
@@ -424,7 +426,7 @@ class Graph:
     ):
         """Apply a threshold to the graph, setting the in_graph attribute of edges/nodes/neurons to True if the score is above the threshold.
         If a node or neuron has no score, it's assumed to always be in the graph.
-        
+
         Args:
             threshold (float): the threshold to apply
             absolute (bool): whether to take the absolute value of the scores before applying the threshold
@@ -506,7 +508,7 @@ class Graph:
                 self.nodes_in_graph += nodes_with_outgoing & nodes_with_ingoing
                 if positional:
                     positional_nodes_with_ingoing[...,0] = True
-                    self.positional_nodes_in_graph = positional_nodes_with_outgoing & positional_nodes_with_ingoing
+                    #self.positional_nodes_in_graph = positional_nodes_with_outgoing & positional_nodes_with_ingoing
         else:
             raise ValueError(f"Invalid level: {level}")
 
@@ -653,10 +655,10 @@ class Graph:
         old_new_same = False
         # Could take twice as many iterations as there are layers! But will probably not
         while not old_new_same:
-            if positional:
-                nodes_to_keep = self.positional_nodes_in_graph.clone()
-            else:
-                nodes_to_keep = self.nodes_in_graph.clone()
+            # if positional:
+            #     nodes_to_keep = self.positional_nodes_in_graph.clone()
+            # else:
+            nodes_to_keep = self.nodes_in_graph.clone()
 
             if prune_childless:#remove nodes with 0 outgoing edges
                 nodes_with_outgoing = self.in_graph.any(dim=1)
@@ -666,26 +668,97 @@ class Graph:
                 nodes_with_ingoing[0] = True  # input node always treated as if it has incoming edges
                 nodes_to_keep &= nodes_with_ingoing
 
-            if positional:
-                old_nodes_in_graph = self.positional_nodes_in_graph.clone()
-                self.positional_nodes_in_graph = nodes_to_keep
-            else:
-                old_nodes_in_graph = self.nodes_in_graph.clone()
-                self.nodes_in_graph[:] = nodes_to_keep
+            # if positional:
+            #     old_nodes_in_graph = self.positional_nodes_in_graph.clone()
+            #     self.positional_nodes_in_graph = nodes_to_keep
+            # else:
+            old_nodes_in_graph = self.nodes_in_graph.clone()
+            self.nodes_in_graph[:] = nodes_to_keep
 
             # remove edges with missing parents or children
-            if positional:
-                forward_in_graph = self.positional_nodes_in_graph.float()
-            else:
-                forward_in_graph = self.nodes_in_graph.float()
-            backward_in_graph = (forward_in_graph @ self.forward_to_backward.float())
+            # if positional:
+            #     forward_in_graph = self.positional_nodes_in_graph.float()
+            # else:
+            forward_in_graph = self.nodes_in_graph.float()
+            backward_in_graph = forward_in_graph @ self.forward_to_backward.float()
             backward_in_graph[...,-1] = 1  # logits node is always present
             edge_remask = einsum(forward_in_graph, backward_in_graph, '... forward, ... backward -> ... forward backward') > 0
             if positional:
+                assert self.positional_edges_in_graph is not None
                 old_edges_in_graph = self.positional_edges_in_graph.clone()
                 self.positional_edges_in_graph *= edge_remask
+                # remove edges into / out of MLP nodes if no outgoing / incoming edge belongs to the same position
+                # remove edges into attention nodes if all outgoing edges belong to earlier positions, and vice-versa
+                edges_into_mlp = einsum(
+                    self.positional_edges_in_graph, self.mlp_mask_backward,
+                    "pos forward backward, backward -> pos forward backward"
+                )
+                edges_from_mlp = einsum(
+                    self.positional_edges_in_graph, self.mlp_mask_forward,
+                    "pos forward backward, forward -> pos forward backward"
+                )
+                #TODO possibly make attention masks into graph attributes
+                edges_into_attn = einsum(
+                    self.positional_edges_in_graph, ~self.mlp_mask_backward,
+                    "pos forward backward, backward -> pos forward backward"
+                )
+                edges_into_attn[...,-1] = 0
+                edges_from_attn = einsum(
+                    self.positional_edges_in_graph, ~self.mlp_mask_forward,
+                    "pos forward backward, forward -> pos forward backward"
+                )
+                edges_from_attn[:,0,:] = 0
+                if prune_childless:
+                    #remove edges INTO nodes if outgoing edges don't fit
+                    #mlp nodes
+                    edges_from_mlp_with_backward_indexing = einsum(
+                        edges_from_mlp, self.forward_to_backward,
+                        "pos forward_mlp backward, forward_mlp backward_mlp -> pos backward_mlp"
+                    ) > 0
+                    keep_edges_into_mlp = einsum(
+                        edges_into_mlp, edges_from_mlp_with_backward_indexing,
+                        "pos forward backward_mlp, pos backward_mlp -> pos forward backward_mlp"
+                    ) > 0
+                    #attention nodes
+                    edges_from_attn_with_backward_indexing = einsum(
+                        edges_from_attn, self.forward_to_backward,
+                        "pos forward_attn backward, forward_attn backward_attn -> pos backward_attn"
+                    ) > 0
+                    #edges from attn at positions higher or equal to current one (the only valid ones);
+                    # doing reverse cumsum as in https://github.com/pytorch/pytorch/issues/33520
+                    cum_sum = torch.cumsum(edges_from_attn_with_backward_indexing, dim=0)
+                    re_cum_sum = (edges_from_attn_with_backward_indexing - cum_sum + cum_sum[-1:None]) > 0
+                    keep_edges_into_attn = einsum(
+                        edges_into_attn, re_cum_sum,
+                        "pos forward backward_attn, pos backward_attn backward -> pos forward backward_attn"
+                    ) > 0
+                    self.positional_edges_in_graph &= (keep_edges_into_mlp | keep_edges_into_attn)
+                if prune_parentless:
+                    #remove edges OUT OF nodes if incoming edges don't fit
+                    #mlp nodes
+                    edges_into_mlp_with_forward_indexing = einsum(
+                        edges_into_mlp, self.forward_to_backward,
+                        "pos forward backward_mlp, forward_mlp backward_mlp -> pos forward_mlp"
+                    ) > 0
+                    keep_edges_from_mlp = einsum(
+                        edges_from_mlp, edges_into_mlp_with_forward_indexing,
+                        "pos forward_mlp backward, pos forward_mlp -> pos forward_mlp backward"
+                    ) > 0
+                    #attention nodes
+                    edges_into_attn_with_forward_indexing = einsum(
+                        edges_into_attn, self.forward_to_backward,
+                        "pos forward backward_attn, forward_attn backward_attn -> pos forward_attn"
+                    ) > 0
+                    #edges into attn at positions lower or equal to current one (the only valid ones);
+                    cum_sum = torch.cumsum(edges_into_attn_with_forward_indexing, dim=0) > 0
+                    keep_edges_from_attn = einsum(
+                        edges_from_attn, cum_sum,
+                        "pos forward_attn backward, pos forward_attn -> pos forward_attn backward"
+                    ) > 0
+                    self.positional_edges_in_graph &= (keep_edges_from_mlp | keep_edges_from_attn)
+
                 old_new_same = (
-                    torch.all(old_nodes_in_graph == self.positonal_nodes_in_graph) and
+                    torch.all(old_nodes_in_graph == self.nodes_in_graph) and
                     torch.all(old_edges_in_graph == self.positional_edges_in_graph)
                 )
             else:
@@ -755,11 +828,13 @@ class Graph:
         graph.nodes_in_graph = torch.zeros(graph.n_forward).bool()# if n_pos==0
             #else torch.zeros((n_pos, graph.n_forward))
         #)
+        graph.mlp_mask_forward = torch.zeros(graph.n_forward).bool()
+        graph.mlp_mask_backward = torch.zeros(graph.n_backward).bool()
         graph.positional_scores = None
         graph.positional_edges_in_graph = None
-        graph.positional_nodes_in_graph = None
+        #graph.positional_nodes_in_graph = None
         if node_scores:
-            graph.nodes_scores = torch.zeros_like(graph.nodes_in_graph)
+            graph.nodes_scores = torch.zeros_like(graph.nodes_in_graph).float()
             graph.nodes_scores[:] = torch.nan
         else:
             graph.nodes_scores = None
@@ -795,6 +870,8 @@ class Graph:
             graph.forward_to_backward[
                 graph.forward_index(mlp_node, attn_slice=False), graph.backward_index(mlp_node, attn_slice=False)
             ] = True
+            graph.mlp_mask_forward[graph.forward_index(mlp_node, attn_slice=False)] = True
+            graph.mlp_mask_backward[graph.backward_index(mlp_node, attn_slice=False)] = True
 
             if graph.cfg['parallel_attn_mlp']:
                 for node in residual_stream:
@@ -867,6 +944,8 @@ class Graph:
             d['neurons_scores'] = self.neurons_scores
         if self.positional_scores is not None:
             d['positional_scores'] = self.positional_scores
+        if self.positional_edges_in_graph is not None:
+            d['positional_edges_in_graphs'] = self.positional_edges_in_graph
         torch.save(d, filename)
 
     @classmethod
@@ -948,6 +1027,9 @@ class Graph:
 
         if 'positional_scores' in d:
             g.positional_scores = d['positional_scores']
+
+        if 'positional_edges_in_graph' in d:
+            g.positional_edges_in_graph = d['positional_edges_in_graph']
 
         return g
 
