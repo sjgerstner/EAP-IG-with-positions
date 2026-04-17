@@ -506,16 +506,21 @@ class Graph:
                 nodes_with_ingoing = reduce(positional_nodes_with_ingoing, '... forward -> forward', 'max')
                 nodes_with_ingoing[0] = True
                 self.nodes_in_graph += nodes_with_outgoing & nodes_with_ingoing
-                if positional:
-                    positional_nodes_with_ingoing[...,0] = True
-                    #self.positional_nodes_in_graph = positional_nodes_with_outgoing & positional_nodes_with_ingoing
         else:
             raise ValueError(f"Invalid level: {level}")
 
         if prune:
             self.prune(**prune_kwargs)
 
-    def apply_topn(self, n:int, absolute: bool=True, level:Literal['edge','node','neuron']='edge', reset: bool=True, prune:bool=True, **prune_kwargs):
+    def apply_topn(
+        self, n:int,
+        absolute: bool=True,
+        level:Literal['edge','node','neuron']='edge',
+        reset: bool=True,
+        positional: bool=False,
+        prune:bool=True,
+        **prune_kwargs
+    ):
         """Sets the graph to contain only the top-n components. The components are specified by the level parameter, which can be 'edge','node', or 'neuron'. If 'node', the top-n nodes are selected based on their scores, and all outgoing edges to nodes in the graph are true. If 'edge', the top-n edges are selected based on their scores. If 'neuron', the top-n neurons are selected based on their scores, and all outgoing edges to nodes with neurons in the graph are true.
 
         Args:
@@ -529,6 +534,8 @@ class Graph:
             self.reset()
 
         if level == 'neuron':
+            if positional:
+                raise NotImplementedError("positional is currently only implemented for edge-level circuits")
             scored_neurons =  ~torch.isnan(self.neurons_scores)
             n_scored_neurons = scored_neurons.sum()
             assert  n <= n_scored_neurons, f"Requested n ({n}) is greater than the number of scored neurons ({n_scored_neurons})"
@@ -554,6 +561,8 @@ class Graph:
                 self.in_graph += self.nodes_in_graph.view(-1, 1)
                 
         elif level == 'node':
+            if positional:
+                raise NotImplementedError("positional is currently only implemented for edge-level circuits")
             scored_nodes =  ~torch.isnan(self.nodes_scores)
             n_scored_nodes = scored_nodes.sum()
             assert  n <= n_scored_nodes, f"Requested n ({n}) is greater than the number of scored nodes ({n_scored_nodes})"
@@ -580,26 +589,48 @@ class Graph:
         # get top-n edges
         elif level == 'edge':
             assert n <= self.real_edge_mask.sum(), f"Requested n ({n}) is greater than the number of edges ({self.real_edge_mask.sum()})"
-            
-            edge_scores = self.scores.clone()
+
+            if positional:
+                assert self.positional_scores is not None, "You haven't computed positional scores yet!"
+                edge_scores = self.positional_scores.clone()
+            else:
+                edge_scores = self.scores.clone()
+
             if absolute:
                 edge_scores = torch.abs(edge_scores)
-            
+
             # masking out the edges that are not real
-            edge_scores[~self.real_edge_mask] = -torch.inf 
-            
+            edge_scores[...,~self.real_edge_mask] = -torch.inf 
+
             sorted_edges = torch.argsort(edge_scores.view(-1), descending=True)
-            self.in_graph.view(-1)[sorted_edges[:n]] = True
-            self.in_graph.view(-1)[sorted_edges[n:]] = False
+            if positional:
+                self.positional_edges_in_graph.view(-1)[sorted_edges[:n]] = True
+                self.positional_edges_in_graph.view(-1)[sorted_edges[n:]] = False
+            else:
+                self.in_graph.view(-1)[sorted_edges[:n]] = True
+                self.in_graph.view(-1)[sorted_edges[n:]] = False
+
             if reset:
-                nodes_with_outgoing = self.in_graph.any(dim=1)
-                nodes_with_ingoing = einsum(self.in_graph.any(dim=0).float(), self.forward_to_backward.float(), 'backward, forward backward -> forward') > 0
+                if positional:
+                    nodes_with_outgoing = self.positional_edges_in_graph.any(dim=-1).any(dim=0) #pos forward backward -> pos forward -> forward
+                    nodes_with_ingoing = einsum(
+                        self.in_graph.any(dim=-2).float(),#pos backward
+                        self.forward_to_backward.float(),
+                        'pos backward, forward backward -> forward'
+                    ) > 0
+                else:
+                    nodes_with_outgoing = self.in_graph.any(dim=1)
+                    nodes_with_ingoing = einsum(
+                        self.in_graph.any(dim=0).float(),
+                        self.forward_to_backward.float(),
+                        'backward, forward backward -> forward'
+                    ) > 0
                 nodes_with_ingoing[0] = True
                 self.nodes_in_graph += nodes_with_outgoing & nodes_with_ingoing
-            
+
         else:
             raise ValueError(f"Invalid level: {level}")
-        
+
         if prune:
             self.prune(**prune_kwargs)
 
