@@ -206,6 +206,16 @@ class Edge:
     def in_graph(self, value):
         self.graph.in_graph[self.matrix_index] = value
 
+    @property
+    def positional_scores(self) -> torch.Tensor:
+        assert self.graph.positional_scores is not None
+        return self.graph.positional_scores[:,self.matrix_index]
+
+    @positional_scores.setter
+    def positional_scores(self, values:torch.Tensor):
+        assert self.graph.positional_scores is not None
+        self.graph.positional_scores[:,self.matrix_index] = values
+
 class GraphConfig(dict):
     def __init__(self, *args, **kwargs):
         super(GraphConfig, self).__init__(*args, **kwargs)
@@ -634,7 +644,13 @@ class Graph:
         if prune:
             self.prune(**prune_kwargs)
 
-    def apply_greedy(self, n_edges:int, absolute: bool = True, reset:bool = True, prune:bool = True, **prune_kwargs):
+    def apply_greedy(
+        self,
+        n_edges:int, absolute: bool = True, reset:bool = True,
+        positional: bool=False,
+        prune:bool = True,
+        **prune_kwargs
+    ):
         """
         Gets the topn edges of the graph using a greedy algorithm that works from the logits up. Only defined over edges
         
@@ -645,27 +661,81 @@ class Graph:
         """
         if n_edges > len(self.edges):
             raise ValueError(f"n ({n_edges}) is greater than the number of edges ({len(self.edges)})")
-        
+
         if reset:
             self.nodes_in_graph *= False
             self.in_graph *= False
+            if positional and (self.positional_edges_in_graph is not None):
+                self.positional_edges_in_graph *= False
 
         def abs_id(s: float):
             return abs(s) if absolute else s
 
-        candidate_edges = sorted([edge for edge in self.edges.values() if edge.child.in_graph], key = lambda edge: abs_id(edge.score), reverse=True)
+        if positional:
+            assert self.positional_scores is not None, "You haven't computed positional scores yet!"
+            key = lambda d: abs_id(d["edge"].positional_scores[d["pos"]])
+            candidate_edges = sorted(
+                [
+                    {"pos":pos, "edge":edge}
+                    for edge in self.edges.values() if edge.child.in_graph
+                    for pos in range(self.positional_scores.shape[0])
+                ],
+                key = key,
+                reverse=True,
+            )
+        else:
+            key = lambda edge: abs_id(edge.score.item())
+            candidate_edges = sorted(
+                [edge for edge in self.edges.values() if edge.child.in_graph],
+                key = key,
+                reverse=True
+            )
 
-        edges = heapq.merge(candidate_edges, key = lambda edge: abs_id(edge.score), reverse=True)
+        edges = heapq.merge(
+            candidate_edges,
+            key = key,
+            reverse=True
+        )
         while n_edges > 0:
             n_edges -= 1
             top_edge = next(edges)
-            top_edge.in_graph = True
-            parent = top_edge.parent
+
+            if positional:
+                self.positional_edges_in_graph[top_edge["pos"], top_edge["edge"]]
+                parent = top_edge["edge"].parent
+            else:
+                top_edge.in_graph = True
+                parent = top_edge.parent
+
             if not parent.in_graph:
                 parent.in_graph = True
-                parent_parent_edges = sorted([parent_edge for parent_edge in parent.parent_edges], key = lambda edge: abs_id(edge.score), reverse=True)
-                edges = heapq.merge(edges, parent_parent_edges, key = lambda edge: abs_id(edge.score), reverse=True)
-        
+                if positional:
+                    if isinstance(parent, MLPNode):
+                        parent_edge_list = [
+                            {"pos":top_edge["pos"], "edge":edge}
+                            for edge in parent.parent_edges
+                        ]
+                    else:
+                        parent_edge_list = [
+                            {"pos":pos, "edge":edge}
+                            for edge in parent.parent_edges
+                            for pos in range(top_edge["pos"]+1)
+                        ]
+                else:#not positional
+                    parent_edge_list = [parent_edge for parent_edge in parent.parent_edges]
+
+                parent_parent_edges = sorted(
+                    parent_edge_list,
+                    key = key,
+                    reverse=True
+                )
+                edges = heapq.merge(
+                    edges,
+                    parent_parent_edges,
+                    key = key,
+                    reverse=True
+                )
+
         if prune:
             self.prune(**prune_kwargs)
 
