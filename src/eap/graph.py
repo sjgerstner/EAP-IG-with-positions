@@ -673,6 +673,8 @@ class Graph:
 
         if positional:
             assert self.positional_scores is not None, "You haven't computed positional scores yet!"
+            if self.positional_edges_in_graph is None:
+                self.positional_edges_in_graph = torch.zeros_like(self.positional_scores)
             key = lambda d: abs_id(d["edge"].positional_scores[d["pos"]])
             candidate_edges = sorted(
                 [
@@ -701,7 +703,7 @@ class Graph:
             top_edge = next(edges)
 
             if positional:
-                self.positional_edges_in_graph[top_edge["pos"], top_edge["edge"]]
+                self.positional_edges_in_graph[top_edge["pos"], top_edge["edge"]] = True
                 parent = top_edge["edge"].parent
             else:
                 top_edge.in_graph = True
@@ -1141,7 +1143,8 @@ class Graph:
         minimum_penwidth: float = 0.6,
         maximum_penwidth: float = 5.0,
         layout: str="dot",
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
+        positional: bool=False,
     ):
 
         """Export the graph as a .png file
@@ -1149,12 +1152,11 @@ class Graph:
         Filename: the filename to save the graph to
         Colorscheme: a cmap colorscheme
         """
-        if self.positional_scores is not None:
-            raise NotImplementedError(
-                "Cannot yet represent a positional circuit as image. We're working on it!"
-            )#TODO to_image for positional_scores
         import pygraphviz as pgv
-        g = pgv.AGraph(directed=True, bgcolor="white", overlap="false", splines="true", layout=layout)
+        g = pgv.AGraph(
+            directed=True, bgcolor="white", overlap="false", splines="true", layout=layout,
+            strict=False,#even without positions, there can be several edges (q,k,v) between the same two nodes
+        )
 
         if seed is not None:
             np.random.seed(seed)
@@ -1171,16 +1173,28 @@ class Graph:
                         fontname="Helvetica",
                         )
 
-        scores = self.scores.view(-1).abs()
+        if positional:
+            assert self.positional_edges_in_graph is not None
+            scores = self.positional_scores.view(-1).abs()
+            position_range = range(self.positional_scores.shape[0].item())
+        else:
+            scores = self.scores.view(-1).abs()
+            position_range = [0]
         max_score = scores.max().item()
         min_score = scores.min().item()
         for edge in self.edges.values():
-            if edge.in_graph:
-                normalized_score = (abs(edge.score) - min_score) / (max_score - min_score) if max_score != min_score else abs(edge.score)
-                penwidth = max(minimum_penwidth, normalized_score * maximum_penwidth)
-                g.add_edge(edge.parent.name,
-                        edge.child.name,
-                        penwidth=str(penwidth),
-                        color=get_color(edge.qkv, edge.score),
-                        )
+            for pos in position_range:
+                is_in_graph = edge.in_graph if not positional else self.positional_edges_in_graph[pos,edge.matrix_index].item()
+                if is_in_graph:
+                    edge_score = edge.score if not positional else edge.positional_scores[pos]
+                    normalized_score = (abs(edge_score) - min_score) / (max_score - min_score) if max_score != min_score else abs(edge_score)
+                    penwidth = max(minimum_penwidth, normalized_score * maximum_penwidth)
+                    edge_label = f'pos{pos}' if positional else None
+                    g.add_edge(edge.parent.name,
+                            edge.child.name,
+                            penwidth=str(penwidth),
+                            color=get_color(edge.qkv, edge.score),
+                            label=edge_label,
+                            key=str(edge_label)+str(edge.qkv),
+                            )
         g.draw(filename, prog="dot")
