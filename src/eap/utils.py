@@ -42,6 +42,7 @@ def tokenize_plus(model: HookedTransformer, inputs: List[str], max_length: Optio
 def make_hooks_and_matrices(
     model: HookedTransformer, graph: Graph, batch_size:int , n_pos:int, scores: Optional[Tensor],
     keep_pos_dims:bool=False,
+    lower_is_better:bool=True,
 ):
     """Makes a matrix, and hooks to fill it and the score matrix up
 
@@ -137,14 +138,15 @@ def make_hooks_and_matrices(
 
     node = graph.nodes['input']
     fwd_index = graph.forward_index(node)
-    fwd_hooks_corrupted.append((node.out_hook, partial(activation_hook, fwd_index)))
-    fwd_hooks_clean.append((node.out_hook, partial(activation_hook, fwd_index, add=False)))
+    fwd_hooks_corrupted.append((node.out_hook, partial(activation_hook, fwd_index, add=lower_is_better)))
+    fwd_hooks_clean.append((node.out_hook, partial(activation_hook, fwd_index, add=not lower_is_better)))
 
     for layer in range(graph.cfg['n_layers']):
         node = graph.nodes[f'a{layer}.h0']
         fwd_index = graph.forward_index(node)
-        fwd_hooks_corrupted.append((node.out_hook, partial(activation_hook, fwd_index)))
-        fwd_hooks_clean.append((node.out_hook, partial(activation_hook, fwd_index, add=False)))
+        #we want to ADD the clean activation and SUBTRACT the corrupted one
+        fwd_hooks_corrupted.append((node.out_hook, partial(activation_hook, fwd_index, add=lower_is_better)))
+        fwd_hooks_clean.append((node.out_hook, partial(activation_hook, fwd_index, add=not lower_is_better)))
         prev_index = graph.prev_index(node)
         # assert isinstance(prev_index, int)
         for i, letter in enumerate('qkv'):
@@ -162,8 +164,9 @@ def make_hooks_and_matrices(
         bwd_index = graph.backward_index(node)
         prev_index = graph.prev_index(node)
         # assert isinstance(prev_index, int)
-        fwd_hooks_corrupted.append((node.out_hook, partial(activation_hook, fwd_index)))
-        fwd_hooks_clean.append((node.out_hook, partial(activation_hook, fwd_index, add=False)))
+        #we want to ADD the clean activation and SUBTRACT the corrupted one
+        fwd_hooks_corrupted.append((node.out_hook, partial(activation_hook, fwd_index, add=lower_is_better)))
+        fwd_hooks_clean.append((node.out_hook, partial(activation_hook, fwd_index, add=not lower_is_better)))
         bwd_hooks.append((
             node.in_hook,
             partial(

@@ -55,6 +55,7 @@ def get_scores_eap(
     corruption_hooks: Optional[list]=None,
     quiet=False,
     keep_pos_dims:bool=False,
+    lower_is_better:bool=True,
 ):
     """Gets edge attribution scores using EAP.
 
@@ -108,7 +109,9 @@ def get_scores_eap(
 
         #activation_difference (almost) doesn't appear explicitly later on, but it's necessary for the hooks to work
         (fwd_hooks_corrupted, fwd_hooks_clean, bwd_hooks), activation_difference = make_hooks_and_matrices(
-            model, graph, batch_size, n_pos, scores, keep_pos_dims=keep_pos_dims,
+            model, graph, batch_size, n_pos, scores,
+            keep_pos_dims=keep_pos_dims,
+            lower_is_better=lower_is_better,
         )
         if corruption_hooks:
             fwd_hooks_corrupted_new = corruption_hooks + fwd_hooks_corrupted
