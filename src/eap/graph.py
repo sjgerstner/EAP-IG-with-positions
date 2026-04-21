@@ -209,12 +209,12 @@ class Edge:
     @property
     def positional_scores(self) -> torch.Tensor:
         assert self.graph.positional_scores is not None
-        return self.graph.positional_scores[:,self.matrix_index]
+        return self.graph.positional_scores[:,*(self.matrix_index)]
 
     @positional_scores.setter
     def positional_scores(self, values:torch.Tensor):
         assert self.graph.positional_scores is not None
-        self.graph.positional_scores[:,self.matrix_index] = values
+        self.graph.positional_scores[:,*(self.matrix_index)] = values
 
 class GraphConfig(dict):
     def __init__(self, *args, **kwargs):
@@ -489,6 +489,7 @@ class Graph:
         elif level == 'edge':
             if positional:
                 assert self.positional_scores is not None, "You haven't computed positional scores yet!"
+                self.positional_edges_in_graph = torch.zeros_like(self.positional_scores).bool()
                 edge_scores = self.positional_scores.clone()
             else:
                 edge_scores = self.scores.clone()
@@ -520,7 +521,7 @@ class Graph:
             raise ValueError(f"Invalid level: {level}")
 
         if prune:
-            self.prune(**prune_kwargs)
+            self.prune(positional=positional, **prune_kwargs)
 
     def apply_topn(
         self, n:int,
@@ -602,6 +603,7 @@ class Graph:
 
             if positional:
                 assert self.positional_scores is not None, "You haven't computed positional scores yet!"
+                self.positional_edges_in_graph = torch.zeros_like(self.positional_scores).bool()
                 edge_scores = self.positional_scores.clone()
             else:
                 edge_scores = self.scores.clone()
@@ -624,7 +626,7 @@ class Graph:
                 if positional:
                     nodes_with_outgoing = self.positional_edges_in_graph.any(dim=-1).any(dim=0) #pos forward backward -> pos forward -> forward
                     nodes_with_ingoing = einsum(
-                        self.in_graph.any(dim=-2).float(),#pos backward
+                        self.positional_edges_in_graph.any(dim=-2).float(),#pos backward
                         self.forward_to_backward.float(),
                         'pos backward, forward backward -> forward'
                     ) > 0
@@ -642,7 +644,7 @@ class Graph:
             raise ValueError(f"Invalid level: {level}")
 
         if prune:
-            self.prune(**prune_kwargs)
+            self.prune(positional=positional, **prune_kwargs)
 
     def apply_greedy(
         self,
@@ -675,7 +677,7 @@ class Graph:
             assert self.positional_scores is not None, "You haven't computed positional scores yet!"
             if self.positional_edges_in_graph is None:
                 self.positional_edges_in_graph = torch.zeros_like(self.positional_scores)
-            key = lambda d: abs_id(d["edge"].positional_scores[d["pos"]])
+            key = lambda d: abs_id(d["edge"].positional_scores[d["pos"]].item())
             candidate_edges = sorted(
                 [
                     {"pos":pos, "edge":edge}
@@ -703,7 +705,7 @@ class Graph:
             top_edge = next(edges)
 
             if positional:
-                self.positional_edges_in_graph[top_edge["pos"], top_edge["edge"]] = True
+                self.positional_edges_in_graph[top_edge["pos"], *(top_edge["edge"].matrix_index)] = True
                 parent = top_edge["edge"].parent
             else:
                 top_edge.in_graph = True
@@ -739,7 +741,7 @@ class Graph:
                 )
 
         if prune:
-            self.prune(**prune_kwargs)
+            self.prune(positional=positional, **prune_kwargs)
 
 
     def prune(self, prune_childless:bool=True, prune_parentless:bool=True, positional:bool=False):
@@ -755,6 +757,15 @@ class Graph:
         if self.neurons_in_graph is not None:
             self.nodes_in_graph *= self.neurons_in_graph.any(dim=1)
 
+        #preparation
+        if positional:
+            #avoid removing edges into logits
+            edges_into_logits = torch.zeros_like(self.positional_edges_in_graph)
+            edges_into_logits[...,-1] = True
+            #avoid removing edges from input
+            edges_from_input = torch.zeros_like(self.positional_edges_in_graph)
+            edges_from_input[:,0,:] = True
+
         old_new_same = False
         # Could take twice as many iterations as there are layers! But will probably not
         while not old_new_same:
@@ -764,10 +775,17 @@ class Graph:
             nodes_to_keep = self.nodes_in_graph.clone()
 
             if prune_childless:#remove nodes with 0 outgoing edges
-                nodes_with_outgoing = self.in_graph.any(dim=1)
+                if positional:
+                    nodes_with_outgoing = self.positional_edges_in_graph.any(dim=-1).any(dim=0)
+                else:
+                    nodes_with_outgoing = self.in_graph.any(dim=-1)
                 nodes_to_keep &= nodes_with_outgoing
             if prune_parentless:#remove nodes with 0 incoming edges
-                nodes_with_ingoing = einsum(self.in_graph.any(dim=0).float(), self.forward_to_backward.float(), 'backward, forward backward -> forward') > 0
+                if positional:
+                    in_graph_any = self.positional_edges_in_graph.any(dim=-2).float()
+                else:
+                    in_graph_any = self.in_graph.any(dim=-2).float()
+                nodes_with_ingoing = einsum(in_graph_any, self.forward_to_backward.float(), 'backward, forward backward -> forward') > 0
                 nodes_with_ingoing[0] = True  # input node always treated as if it has incoming edges
                 nodes_to_keep &= nodes_with_ingoing
 
@@ -815,50 +833,59 @@ class Graph:
                     #remove edges INTO nodes if outgoing edges don't fit
                     #mlp nodes
                     edges_from_mlp_with_backward_indexing = einsum(
-                        edges_from_mlp, self.forward_to_backward,
-                        "pos forward_mlp backward, forward_mlp backward_mlp -> pos backward_mlp"
+                        edges_from_mlp.any(dim=-1).int(), self.forward_to_backward.int(),
+                        "pos forward_mlp, forward_mlp backward_mlp -> pos backward_mlp"
                     ) > 0
                     keep_edges_into_mlp = einsum(
                         edges_into_mlp, edges_from_mlp_with_backward_indexing,
                         "pos forward backward_mlp, pos backward_mlp -> pos forward backward_mlp"
                     ) > 0
                     #attention nodes
-                    edges_from_attn_with_backward_indexing = einsum(
-                        edges_from_attn, self.forward_to_backward,
-                        "pos forward_attn backward, forward_attn backward_attn -> pos backward_attn"
-                    ) > 0
+                    edges_from_attn_with_backward_indexing = (
+                        einsum(
+                            edges_from_attn.any(dim=-1).int(), self.forward_to_backward.int(),
+                            "pos forward_attn, forward_attn backward_attn -> pos backward_attn"
+                        ) > 0
+                    ).int()
                     #edges from attn at positions higher or equal to current one (the only valid ones);
                     # doing reverse cumsum as in https://github.com/pytorch/pytorch/issues/33520
                     cum_sum = torch.cumsum(edges_from_attn_with_backward_indexing, dim=0)
                     re_cum_sum = (edges_from_attn_with_backward_indexing - cum_sum + cum_sum[-1:None]) > 0
                     keep_edges_into_attn = einsum(
-                        edges_into_attn, re_cum_sum,
-                        "pos forward backward_attn, pos backward_attn backward -> pos forward backward_attn"
+                        edges_into_attn, re_cum_sum,#.any(dim=-1),
+                        "pos forward backward_attn, pos backward_attn -> pos forward backward_attn"
                     ) > 0
-                    self.positional_edges_in_graph &= (keep_edges_into_mlp | keep_edges_into_attn)
+                    #avoid removing edges into logits
+                    edges_into_logits = torch.zeros_like(self.positional_edges_in_graph)
+                    edges_into_logits[...,-1] = True
+                    #actually remove the edges
+                    self.positional_edges_in_graph &= (keep_edges_into_mlp | keep_edges_into_attn | edges_into_logits)
                 if prune_parentless:
                     #remove edges OUT OF nodes if incoming edges don't fit
                     #mlp nodes
                     edges_into_mlp_with_forward_indexing = einsum(
-                        edges_into_mlp, self.forward_to_backward,
-                        "pos forward backward_mlp, forward_mlp backward_mlp -> pos forward_mlp"
+                        edges_into_mlp.any(dim=-2), self.forward_to_backward,
+                        "pos backward_mlp, forward_mlp backward_mlp -> pos forward_mlp"
                     ) > 0
                     keep_edges_from_mlp = einsum(
                         edges_from_mlp, edges_into_mlp_with_forward_indexing,
                         "pos forward_mlp backward, pos forward_mlp -> pos forward_mlp backward"
                     ) > 0
                     #attention nodes
-                    edges_into_attn_with_forward_indexing = einsum(
-                        edges_into_attn, self.forward_to_backward,
-                        "pos forward backward_attn, forward_attn backward_attn -> pos forward_attn"
-                    ) > 0
+                    edges_into_attn_with_forward_indexing = (
+                        einsum(
+                            edges_into_attn.any(dim=-2), self.forward_to_backward,
+                            "pos backward_attn, forward_attn backward_attn -> pos forward_attn"
+                        ) > 0
+                    ).int()
                     #edges into attn at positions lower or equal to current one (the only valid ones);
                     cum_sum = torch.cumsum(edges_into_attn_with_forward_indexing, dim=0) > 0
                     keep_edges_from_attn = einsum(
                         edges_from_attn, cum_sum,
                         "pos forward_attn backward, pos forward_attn -> pos forward_attn backward"
                     ) > 0
-                    self.positional_edges_in_graph &= (keep_edges_from_mlp | keep_edges_from_attn)
+                    #actually remove the edges
+                    self.positional_edges_in_graph &= (keep_edges_from_mlp | keep_edges_from_attn | edges_from_input)
 
                 old_new_same = (
                     torch.all(old_nodes_in_graph == self.nodes_in_graph) and
@@ -1176,25 +1203,31 @@ class Graph:
         if positional:
             assert self.positional_edges_in_graph is not None
             scores = self.positional_scores.view(-1).abs()
-            position_range = range(self.positional_scores.shape[0].item())
         else:
             scores = self.scores.view(-1).abs()
-            position_range = [0]
         max_score = scores.max().item()
         min_score = scores.min().item()
         for edge in self.edges.values():
-            for pos in position_range:
-                is_in_graph = edge.in_graph if not positional else self.positional_edges_in_graph[pos,edge.matrix_index].item()
-                if is_in_graph:
-                    edge_score = edge.score if not positional else edge.positional_scores[pos]
-                    normalized_score = (abs(edge_score) - min_score) / (max_score - min_score) if max_score != min_score else abs(edge_score)
-                    penwidth = max(minimum_penwidth, normalized_score * maximum_penwidth)
-                    edge_label = f'pos{pos}' if positional else None
-                    g.add_edge(edge.parent.name,
-                            edge.child.name,
-                            penwidth=str(penwidth),
-                            color=get_color(edge.qkv, edge.score),
-                            label=edge_label,
-                            key=str(edge_label)+str(edge.qkv),
-                            )
+            if positional:
+                relevant_positions = self.positional_edges_in_graph[:,*(edge.matrix_index)].nonzero().flatten()
+            else:
+                relevant_positions = [0] if edge.in_graph else []
+            for pos in relevant_positions:
+                edge_score = edge.score if not positional else edge.positional_scores[pos]
+                normalized_score = (abs(edge_score) - min_score) / (max_score - min_score) if max_score != min_score else abs(edge_score)
+                penwidth = max(minimum_penwidth, normalized_score * maximum_penwidth)
+                kwargs = {
+                    "penwidth":str(penwidth),
+                    "color":get_color(edge.qkv, edge.score),
+                }
+                if positional:
+                    kwargs["label"] = f'pos{pos}'
+                    kwargs["key"] = f'pos{pos}{edge.qkv}'
+                else:
+                    kwargs["key"] = str(edge.qkv)
+                g.add_edge(
+                    edge.parent.name,
+                    edge.child.name,
+                    **kwargs,
+                )
         g.draw(filename, prog="dot")
