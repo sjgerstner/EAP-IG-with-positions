@@ -509,7 +509,7 @@ class Graph:
             else:
                 self.in_graph[:] = surpass_threshold
 
-            if reset:
+            if reset:#TODO here and in apply_topn it should depend on prune_kwargs
                 positional_nodes_with_outgoing = surpass_threshold.any(dim=-1) #(pos) forward
                 positional_nodes_with_ingoing = einsum(
                     surpass_threshold.any(dim=-2).float(),#(pos) backward
