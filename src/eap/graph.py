@@ -421,6 +421,9 @@ class Graph:
                 self.neurons_in_graph[:] = True
             if self.positional_edges_in_graph is not None:
                 self.positional_edges_in_graph[:] = True
+                self.positional_edges_in_graph &= self.real_edge_mask.unsqueeze(0)
+                #TODO remove unreal positions
+                # not urgent because self.reset(False) is never called in this code
             # if self.positional_nodes_in_graph is not None:
             #     self.positional_nodes_in_graph[:] = True
 
@@ -759,55 +762,50 @@ class Graph:
 
         #preparation
         if positional:
-            #avoid removing edges into logits
-            edges_into_logits = torch.zeros_like(self.positional_edges_in_graph)
-            edges_into_logits[...,-1] = True
-            #avoid removing edges from input
-            edges_from_input = torch.zeros_like(self.positional_edges_in_graph)
-            edges_from_input[:,0,:] = True
+            if prune_childless:
+                #avoid removing edges into logits
+                edges_into_logits = torch.zeros_like(self.positional_edges_in_graph)
+                edges_into_logits[...,-1] = True
+            if prune_parentless:
+                #avoid removing edges from input
+                edges_from_input = torch.zeros_like(self.positional_edges_in_graph)
+                edges_from_input[:,0,:] = True
 
         old_new_same = False
         # Could take twice as many iterations as there are layers! But will probably not
         while not old_new_same:
-            # if positional:
-            #     nodes_to_keep = self.positional_nodes_in_graph.clone()
-            # else:
-            nodes_to_keep = self.nodes_in_graph.clone()
-
+            old_nodes_in_graph = self.nodes_in_graph.clone()
             if prune_childless:#remove nodes with 0 outgoing edges
                 if positional:
                     nodes_with_outgoing = self.positional_edges_in_graph.any(dim=-1).any(dim=0)
                 else:
                     nodes_with_outgoing = self.in_graph.any(dim=-1)
-                nodes_to_keep &= nodes_with_outgoing
+                self.nodes_in_graph[:] &= nodes_with_outgoing
             if prune_parentless:#remove nodes with 0 incoming edges
                 if positional:
-                    in_graph_any = self.positional_edges_in_graph.any(dim=-2).float()
+                    in_graph_any = self.positional_edges_in_graph.any(dim=-2).any(dim=0)
                 else:
-                    in_graph_any = self.in_graph.any(dim=-2).float()
-                nodes_with_ingoing = einsum(in_graph_any, self.forward_to_backward.float(), 'backward, forward backward -> forward') > 0
-                nodes_with_ingoing[0] = True  # input node always treated as if it has incoming edges
-                nodes_to_keep &= nodes_with_ingoing
+                    in_graph_any = self.in_graph.any(dim=-2)
+                nodes_with_ingoing = einsum(
+                    in_graph_any.float(), self.forward_to_backward.float(),
+                    'backward, forward backward -> forward'
+                ) > 0
+                nodes_with_ingoing[0] = True # input node always treated as if it has incoming edges
+                self.nodes_in_graph[:] &= nodes_with_ingoing
 
-            # if positional:
-            #     old_nodes_in_graph = self.positional_nodes_in_graph.clone()
-            #     self.positional_nodes_in_graph = nodes_to_keep
-            # else:
-            old_nodes_in_graph = self.nodes_in_graph.clone()
-            self.nodes_in_graph[:] = nodes_to_keep
 
-            # remove edges with missing parents or children
-            # if positional:
-            #     forward_in_graph = self.positional_nodes_in_graph.float()
-            # else:
             forward_in_graph = self.nodes_in_graph.float()
             backward_in_graph = forward_in_graph @ self.forward_to_backward.float()
-            backward_in_graph[...,-1] = 1  # logits node is always present
-            edge_remask = einsum(forward_in_graph, backward_in_graph, '... forward, ... backward -> ... forward backward') > 0
+            backward_in_graph[-1] = 1  # logits node is always present
+            edge_remask = einsum(
+                forward_in_graph, backward_in_graph,
+                'forward, backward -> forward backward'
+            ) > 0
             if positional:
                 assert self.positional_edges_in_graph is not None
                 old_edges_in_graph = self.positional_edges_in_graph.clone()
-                self.positional_edges_in_graph *= edge_remask
+                #keep only edges with both parent and child
+                self.positional_edges_in_graph *= edge_remask.unsqueeze(0)
                 # remove edges into / out of MLP nodes if no outgoing / incoming edge belongs to the same position
                 # remove edges into attention nodes if all outgoing edges belong to earlier positions, and vice-versa
                 edges_into_mlp = einsum(
@@ -850,16 +848,17 @@ class Graph:
                     #edges from attn at positions higher or equal to current one (the only valid ones);
                     # doing reverse cumsum as in https://github.com/pytorch/pytorch/issues/33520
                     cum_sum = torch.cumsum(edges_from_attn_with_backward_indexing, dim=0)
-                    re_cum_sum = (edges_from_attn_with_backward_indexing - cum_sum + cum_sum[-1:None]) > 0
+                    re_cum_sum = (
+                        edges_from_attn_with_backward_indexing - cum_sum + cum_sum[-1:None]
+                    ) > 0
                     keep_edges_into_attn = einsum(
                         edges_into_attn, re_cum_sum,#.any(dim=-1),
                         "pos forward backward_attn, pos backward_attn -> pos forward backward_attn"
                     ) > 0
-                    #avoid removing edges into logits
-                    edges_into_logits = torch.zeros_like(self.positional_edges_in_graph)
-                    edges_into_logits[...,-1] = True
                     #actually remove the edges
-                    self.positional_edges_in_graph &= (keep_edges_into_mlp | keep_edges_into_attn | edges_into_logits)
+                    self.positional_edges_in_graph &= (
+                        keep_edges_into_mlp | keep_edges_into_attn | edges_into_logits
+                    )
                 if prune_parentless:
                     #remove edges OUT OF nodes if incoming edges don't fit
                     #mlp nodes
@@ -893,6 +892,7 @@ class Graph:
                 )
             else:
                 old_edges_in_graph = self.in_graph.clone()
+                #keep only edges with both parent and child
                 self.in_graph *= edge_remask
                 old_new_same = (
                     torch.all(old_nodes_in_graph == self.nodes_in_graph) and
@@ -1210,6 +1210,8 @@ class Graph:
         for edge in self.edges.values():
             if positional:
                 relevant_positions = self.positional_edges_in_graph[:,*(edge.matrix_index)].nonzero().flatten()
+                # if edge.matrix_index==(1056,3104):
+                #     print(relevant_positions)
             else:
                 relevant_positions = [0] if edge.in_graph else []
             for pos in relevant_positions:
@@ -1222,9 +1224,9 @@ class Graph:
                 }
                 if positional:
                     kwargs["label"] = f'pos{pos}'
-                    kwargs["key"] = f'pos{pos}{edge.qkv}'
+                    kwargs["key"] = edge.name+f'pos{pos}'
                 else:
-                    kwargs["key"] = str(edge.qkv)
+                    kwargs["key"] = edge.name
                 g.add_edge(
                     edge.parent.name,
                     edge.child.name,
