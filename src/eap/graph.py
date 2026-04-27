@@ -509,7 +509,7 @@ class Graph:
             else:
                 self.in_graph[:] = surpass_threshold
 
-            if reset:#TODO here and in apply_topn it should depend on prune_kwargs
+            if reset and not prune:#if prune it will be done anyway
                 positional_nodes_with_outgoing = surpass_threshold.any(dim=-1) #(pos) forward
                 positional_nodes_with_ingoing = einsum(
                     surpass_threshold.any(dim=-2).float(),#(pos) backward
@@ -519,7 +519,11 @@ class Graph:
                 nodes_with_outgoing = reduce(positional_nodes_with_outgoing, '... forward -> forward', 'max')
                 nodes_with_ingoing = reduce(positional_nodes_with_ingoing, '... forward -> forward', 'max')
                 nodes_with_ingoing[0] = True
-                self.nodes_in_graph += nodes_with_outgoing & nodes_with_ingoing
+                self.nodes_in_graph += nodes_with_outgoing | nodes_with_ingoing
+                if ("prune_childless" not in prune_kwargs) or prune_kwargs["prune_childless"]:
+                    self.nodes_in_graph &= nodes_with_outgoing
+                if ("prune_parentless" not in prune_kwargs) or prune_kwargs["prune_parentless"]:
+                    self.nodes_in_graph &= nodes_with_ingoing
         else:
             raise ValueError(f"Invalid level: {level}")
 
@@ -625,7 +629,7 @@ class Graph:
                 self.in_graph.view(-1)[sorted_edges[:n]] = True
                 self.in_graph.view(-1)[sorted_edges[n:]] = False
 
-            if reset:
+            if reset and not prune:#if prune it will be done anyway
                 if positional:
                     nodes_with_outgoing = self.positional_edges_in_graph.any(dim=-1).any(dim=0) #pos forward backward -> pos forward -> forward
                     nodes_with_ingoing = einsum(
@@ -641,7 +645,11 @@ class Graph:
                         'backward, forward backward -> forward'
                     ) > 0
                 nodes_with_ingoing[0] = True
-                self.nodes_in_graph += nodes_with_outgoing & nodes_with_ingoing
+                self.nodes_in_graph += nodes_with_outgoing | nodes_with_ingoing
+                if ("prune_childless" not in prune_kwargs) or prune_kwargs["prune_childless"]:
+                    self.nodes_in_graph &= nodes_with_outgoing
+                if ("prune_parentless" not in prune_kwargs) or prune_kwargs["prune_parentless"]:
+                    self.nodes_in_graph &= nodes_with_ingoing
 
         else:
             raise ValueError(f"Invalid level: {level}")
