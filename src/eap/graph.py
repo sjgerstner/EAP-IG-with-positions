@@ -28,13 +28,14 @@ class Node:
     neurons: Optional[torch.Tensor]
     neurons_scores: Optional[torch.Tensor]
     qkv_inputs: Optional[List[str]]
+    subnodes: List['Node|SubNode']
 
     def __init__(self, name: str, layer:int, in_hook: List[str], out_hook: str, index: Tuple, 
                  graph:'Graph', qkv_inputs: Optional[List[str]]=None):
         self.name = name
         self.layer = layer
         self.in_hook = in_hook
-        self.out_hook = out_hook 
+        self.out_hook = out_hook
         self.index = index
         self.graph = graph
         self.parents = set()
@@ -42,6 +43,7 @@ class Node:
         self.parent_edges = set()
         self.child_edges = set()
         self.qkv_inputs = qkv_inputs
+        self.subnodes = [self]
 
     def __repr__(self):
         return f'Node({self.name}, in_graph: {self.in_graph})'
@@ -94,6 +96,47 @@ class Node:
             raise RuntimeError(f"Cannot set score for node {self.name} because the graph does not have node scores enabled")
         self.graph.neurons_scores[self.graph.forward_index(self, attn_slice=False)] = value
 
+class SubNode():
+    """
+    If a node output is a sum of terms (like a MLP that's a sum of its hidden dimensions' outputs),
+    a subnode represents one of these terms.
+    Most important properties are node and index.
+    Then there's also in_hooks (a list of strings for things like gate and in)
+    and corresponding
+    """
+    node: Node
+    index: int
+    in_hooks: list[str]
+    out_hook: str
+    in_weights: list[torch.Tensor]
+    out_weights: torch.Tensor
+    name:str
+    parents: Set['Node|SubNode']
+    parent_edges: Set['Edge']
+    children: Set['Node|SubNode']
+    child_edges: Set['Edge']
+
+    def __init__(
+        self,
+        node:Node,  index:int,
+        in_hooks:list[str], out_hook:str,
+        in_weights:list[torch.Tensor], out_weights:torch.Tensor
+    ):
+        assert len(in_hooks)==len(in_weights), "Every in_hook also needs an in_weight!"
+        self.node = node
+        self.index = index
+        self.name = node.name + '.' + str(index)
+
+        self.in_hooks = in_hooks
+        self.out_hook = out_hook
+        self.in_weights = in_weights
+        self.out_weights = out_weights
+
+        self.parents = set()
+        self.children = set()
+        self.parent_edges = set()
+        self.child_edges = set()
+
 class LogitNode(Node):
     def __init__(self, n_layers:int, graph: 'Graph'):
         name = 'logits'
@@ -118,6 +161,17 @@ class MLPNode(Node):
         #     name += f'.pos{pos}'
         index = slice(None)
         super().__init__(name, layer, f"blocks.{layer}.hook_mlp_in", f"blocks.{layer}.hook_mlp_out", index, graph)
+
+class MLPSubNode(SubNode):
+    """Node corresponding to a single neuron in an MLP. in_weights have to be in the order [gate, in]"""
+    def __init__(self, node:MLPNode, index:int, in_weights:list[torch.Tensor], out_weights:torch.Tensor):
+        layer = node.layer
+        super().__init__(
+            node=node, index=index,
+            in_hooks = [f"blocks.{layer}.mlp.hook_pre", f"blocks.{layer}.mlp.hook_pre_linear"],
+            out_hook = f"blocks.{layer}.mlp.hook_post",
+            in_weights = in_weights, out_weights=out_weights,
+        )
 
 class AttentionNode(Node):
     head: int
@@ -244,7 +298,12 @@ class Graph:
     nodes_in_graph: torch.Tensor  # (n_forward) tensor of whether the (source) node is in the graph
     positional_scores: Optional[torch.Tensor] #(n_pos, n_forward, n_backward)
     positional_edges_in_graph: Optional[torch.Tensor] #(n_pos, n_forward, n_backward)
-    #positional_nodes_in_graph: Optional[torch.Tensor] #(n_pos, n_forward)
+    sub_scores: Optional[torch.Tensor]
+    sub_edges_in_graph: Optional[torch.Tensor]
+    sub_nodes_in_graph: Optional[torch.Tensor]
+    positional_sub_scores: Optional[torch.Tensor]
+    positional_sub_edges_in_graph: Optional[torch.Tensor]
+    positional_sub_nodes_in_graph: Optional[torch.Tensor]
     forward_to_backward: torch.Tensor
     real_edge_mask: torch.Tensor   # (n_forward, n_backward) tensor of whether the edge is real (some edges are not real, e.g. m10->m2)
     mlp_mask_forward: torch.Tensor # (n_forward) tensor of whether the node is an MLP node
@@ -265,7 +324,6 @@ class Graph:
     ):
         edge = Edge(
             self, parent, child, qkv,
-            #pos=pos
         )
         self.real_edge_mask[edge.matrix_index] = True
         self.edges[edge.name] = edge
@@ -917,6 +975,7 @@ class Graph:
         cls, model_or_config: Union[HookedTransformer,HookedTransformerConfig, Dict],
         neuron_level: bool = False, node_scores: bool = False,
         #n_pos:int=0,
+        submlp_indices: Optional[list[tuple[int,int]]]=None,
     ) -> 'Graph':
         """Instantiate a Graph object from a HookedTransformer or HookedTransformerConfig object, or a similar Dict.
         The neuron_level parameter determines whether the graph should be neuron-level or not,
@@ -958,46 +1017,54 @@ class Graph:
         graph.n_backward = graph.cfg['n_layers'] * (3 * graph.cfg['n_heads'] + 1) + 1
         graph.forward_to_backward = torch.zeros((graph.n_forward, graph.n_backward)).bool()
 
-        graph.scores = torch.zeros((graph.n_forward, graph.n_backward))# if n_pos==0
-            #else torch.zeros((n_pos, graph.n_forward, graph.n_backward))
-        #)
+        graph.scores = torch.zeros((graph.n_forward, graph.n_backward))
         graph.real_edge_mask = torch.zeros_like(graph.scores).bool()
         graph.in_graph = torch.zeros_like(graph.scores).bool()
-        graph.nodes_in_graph = torch.zeros(graph.n_forward).bool()# if n_pos==0
-            #else torch.zeros((n_pos, graph.n_forward))
-        #)
+        graph.nodes_in_graph = torch.zeros(graph.n_forward).bool()
         graph.mlp_mask_forward = torch.zeros(graph.n_forward).bool()
         graph.mlp_mask_backward = torch.zeros(graph.n_backward).bool()
         graph.positional_scores = None
         graph.positional_edges_in_graph = None
-        #graph.positional_nodes_in_graph = None
         if node_scores:
             graph.nodes_scores = torch.zeros_like(graph.nodes_in_graph).float()
             graph.nodes_scores[:] = torch.nan
         else:
             graph.nodes_scores = None
         if neuron_level:
-            graph.neurons_scores = torch.zeros((graph.n_forward, graph.cfg['d_model']))# if n_pos==0
-                #else torch.zeros((n_pos, graph.n_forward, graph.cfg['d_model']))
-            #)
+            graph.neurons_scores = torch.zeros((graph.n_forward, graph.cfg['d_model']))
             graph.neurons_in_graph = torch.zeros_like(graph.neurons_scores).bool()
             graph.neurons_scores[:] = torch.nan
         else:
             graph.neurons_in_graph = None
             graph.neurons_scores = None
-        # if n_pos>0:
-        #     graph.positional_scores = torch.zeros((n_pos, graph.n_forward, graph.n_backward))
-        # else:
-        #     graph.positional_scores = None
+
+        if submlp_indices:
+            assert isinstance(model_or_config, HookedTransformer)
+            neurons_by_layer = [[] for l in graph.cfg['n_layers']]
+            for l,n in submlp_indices:
+                neurons_by_layer[l].append(n)
+            max_neurons_by_layer = max(len(indices_in_layer) for indices_in_layer in neurons_by_layer)
+            graph.sub_scores = torch.zeros((graph.n_forward, graph.n_backward, max_neurons_by_layer))
+            graph.sub_edges_in_graph = torch.zeros_like(graph.sub_scores).bool()
+            graph.sub_nodes_in_graph = torch.zeros((graph.n_forward, max_neurons_by_layer))
+        else:
+            graph.sub_scores = None
+            graph.sub_edges_in_graph = None
+            graph.sub_nodes_in_graph = None
+        graph.positional_sub_scores = None #ultimately like sub_scores but with a position dimension in front
+        graph.positional_sub_edges_in_graph = None
+        graph.positional_sub_nodes_in_graph = None
 
         input_node = InputNode(graph)
         graph.nodes[input_node.name] = input_node
         residual_stream = [input_node]
 
         for layer in range(graph.cfg['n_layers']):
+            #create attention and MLP nodes
             attn_nodes = [AttentionNode(layer, head, graph) for head in range(graph.cfg['n_heads'])]
             mlp_node = MLPNode(layer, graph)
 
+            #add attention and MLP nodes to graph
             for attn_node in attn_nodes:
                 graph.nodes[attn_node.name] = attn_node
                 for letter in 'qkv':
@@ -1011,9 +1078,25 @@ class Graph:
             graph.mlp_mask_forward[graph.forward_index(mlp_node, attn_slice=False)] = True
             graph.mlp_mask_backward[graph.backward_index(mlp_node, attn_slice=False)] = True
 
+            #create mlp subnodes
+            mlp_subnodes = []
+            if submlp_indices:
+                mlp_subnodes = [
+                    MLPSubNode(
+                        mlp_node,
+                        index=n,
+                        in_weights=[model_or_config.blocks[layer].mlp.W_gate[:,n], model_or_config.blocks[layer].mlp.W_in[:,n]],
+                        out_weights=model_or_config.blocks[layer].mlp.W_out[n,:],
+                    )
+                    for n in neurons_by_layer[layer]
+                ]
+            #add mlp subnodes to main node
+            mlp_node.subnodes += mlp_subnodes
+
+            #add edges to new nodes
             if graph.cfg['parallel_attn_mlp']:
                 for node in residual_stream:
-                    for attn_node in attn_nodes:          
+                    for attn_node in attn_nodes:
                         for letter in 'qkv':
                             graph.add_edge(node, attn_node, qkv=letter)
                     graph.add_edge(node, mlp_node)

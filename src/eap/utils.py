@@ -144,7 +144,6 @@ def make_hooks_and_matrices(
     for layer in range(graph.cfg['n_layers']):
         node = graph.nodes[f'a{layer}.h0']
         fwd_index = graph.forward_index(node)
-        #we want to ADD the clean activation and SUBTRACT the corrupted one
         fwd_hooks_corrupted.append((node.out_hook, partial(activation_hook, fwd_index, add=lower_is_better)))
         fwd_hooks_clean.append((node.out_hook, partial(activation_hook, fwd_index, add=not lower_is_better)))
         prev_index = graph.prev_index(node)
@@ -164,7 +163,6 @@ def make_hooks_and_matrices(
         bwd_index = graph.backward_index(node)
         prev_index = graph.prev_index(node)
         # assert isinstance(prev_index, int)
-        #we want to ADD the clean activation and SUBTRACT the corrupted one
         fwd_hooks_corrupted.append((node.out_hook, partial(activation_hook, fwd_index, add=lower_is_better)))
         fwd_hooks_clean.append((node.out_hook, partial(activation_hook, fwd_index, add=not lower_is_better)))
         bwd_hooks.append((
