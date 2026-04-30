@@ -975,7 +975,7 @@ class Graph:
         cls, model_or_config: Union[HookedTransformer,HookedTransformerConfig, Dict],
         neuron_level: bool = False, node_scores: bool = False,
         #n_pos:int=0,
-        submlp_indices: Optional[list[tuple[int,int]]]=None,
+        submlp_indices: Optional[list[tuple[int,int]]]=None,#TODO somehow add this as an attribute to the graph
     ) -> 'Graph':
         """Instantiate a Graph object from a HookedTransformer or HookedTransformerConfig object, or a similar Dict.
         The neuron_level parameter determines whether the graph should be neuron-level or not,
@@ -1044,7 +1044,7 @@ class Graph:
             for l,n in submlp_indices:
                 neurons_by_layer[l].append(n)
             max_neurons_by_layer = max(len(indices_in_layer) for indices_in_layer in neurons_by_layer)
-            graph.sub_scores = torch.zeros((graph.n_forward, graph.n_backward, max_neurons_by_layer))
+            graph.sub_scores = torch.zeros((graph.n_forward, graph.n_backward, max_neurons_by_layer, 2*max_neurons_by_layer))
             graph.sub_edges_in_graph = torch.zeros_like(graph.sub_scores).bool()
             graph.sub_nodes_in_graph = torch.zeros((graph.n_forward, max_neurons_by_layer))
         else:
