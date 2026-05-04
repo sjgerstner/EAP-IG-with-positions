@@ -975,7 +975,7 @@ class Graph:
         cls, model_or_config: Union[HookedTransformer,HookedTransformerConfig, Dict],
         neuron_level: bool = False, node_scores: bool = False,
         #n_pos:int=0,
-        submlp_indices: Optional[list[tuple[int,int]]]=None,#TODO somehow add this as an attribute to the graph
+        submlp_indices: Optional[list[tuple[int,int]]]=None,
     ) -> 'Graph':
         """Instantiate a Graph object from a HookedTransformer or HookedTransformerConfig object, or a similar Dict.
         The neuron_level parameter determines whether the graph should be neuron-level or not,

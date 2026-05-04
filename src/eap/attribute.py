@@ -74,13 +74,14 @@ def get_scores_eap(
     Returns:
         Tensor: a [src_nodes, dst_nodes] tensor of scores for each edge
     """
+    scores_shape = [graph.n_forward, graph.n_backward]
     if keep_pos_dims:
         assert len(dataloader)==1, "positional is currently only implemented for single input"
         clean, corrupted, label = next(iter(dataloader))
         clean_tokens, attention_mask, input_lengths, n_pos = tokenize_plus(model, clean)
-        scores_shape = (n_pos, graph.n_forward, graph.n_backward)
-    else:
-        scores_shape = (graph.n_forward, graph.n_backward)
+        scores_shape = [n_pos] + scores_shape
+    if graph.sub_scores is not None:
+        scores_shape += [graph.sub_scores.shape[-2], graph.sub_scores.shape[-1]]
 
     scores = torch.zeros(scores_shape, device=model.cfg.device, dtype=model.cfg.dtype)
 
@@ -134,6 +135,10 @@ def get_scores_eap(
             logits = model(clean_tokens, attention_mask=attention_mask)
             metric_value = metric(logits, clean_logits, input_lengths, label)
             metric_value.backward()
+            if graph.sub_scores is not None:
+                #the score of a node should just show the remainder without its specified subnodes
+                scores[...,:,0] -= scores[...,:,1:].sum(-1)
+                scores[...,0,:] -= scores[...,1:,:].sum(-2)
 
     scores /= total_items
 

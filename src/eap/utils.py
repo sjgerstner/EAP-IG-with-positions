@@ -227,6 +227,10 @@ def make_hooks_and_matrices(
                 prev_index, bwd_index, keep_pos_dims=keep_pos_dims,
             )
         ))
+        if len(node.subnodes)>1:
+            neuron_indices = Tensor([subnode.index for subnode in node.subnodes])
+            fwd_hooks_corrupted.append(node.subnodes[1].out_hook, partial(activation_hook, fwd_index, add=lower_is_better, neuron_indices=neuron_indices))
+            fwd_hooks_clean.append(node.subnodes[1].out_hook, partial(activation_hook, fwd_index, add=not lower_is_better, neuron_indices=neuron_indices))
 
     node = graph.nodes['logits']
     prev_index = graph.prev_index(node)
