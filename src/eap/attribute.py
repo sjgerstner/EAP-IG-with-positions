@@ -519,7 +519,7 @@ def attribute(
         # else:
             graph.positional_scores = scores.to(graph.scores.device)
     else:
-        # if graph.sub_scores is not None:
-        #     graph.sub_scores[:] = scores.to(graph.scores.device)
-        # else:
+        if graph.subnodes_scores is not None:
+            graph.subnodes_scores[:] = scores.to(graph.scores.device)
+        else:
             graph.scores[:] =  scores.to(graph.scores.device)
