@@ -1125,8 +1125,8 @@ class Graph:
 
 
     def to_json(self, filename: str):
-        if self.positional_scores is not None:
-            raise NotImplementedError("Positional scores to json is not supported (and probably will not be as it is memory-inefficient).")
+        if self.positional_scores is not None or self.sub_scores is not None:
+            raise NotImplementedError("Positional or subnode scores to json is not supported (and probably will not be as it is memory-inefficient).")
         # non serializable info
         d = {'cfg':dict(self.cfg)}
         node_dict = {}
@@ -1167,6 +1167,18 @@ class Graph:
             d['positional_scores'] = self.positional_scores
         if self.positional_edges_in_graph is not None:
             d['positional_edges_in_graphs'] = self.positional_edges_in_graph
+        if self.sub_scores is not None:
+            d['sub_scores'] = self.sub_scores
+        if self.sub_edges_in_graph is not None:
+            d['sub_edges_in_graph'] = self.sub_edges_in_graph
+        if self.sub_nodes_in_graph is not None:
+            d['sub_nodes_in_graph'] = self.sub_nodes_in_graph
+        if self.positional_sub_scores is not None:
+            d['positional_sub_scores'] = self.positional_sub_scores
+        if self.positional_sub_edges_in_graph is not None:
+            d['positional_sub_edges_in_graph'] = self.positional_sub_edges_in_graph
+        if self.positional_sub_nodes_in_graph is not None:
+            d['positional_sub_nodes_in_graph'] = self.positional_sub_nodes_in_graph
         torch.save(d, filename)
 
     @classmethod
@@ -1251,6 +1263,19 @@ class Graph:
 
         if 'positional_edges_in_graph' in d:
             g.positional_edges_in_graph = d['positional_edges_in_graph']
+        
+        if 'sub_scores' in d:
+            g.sub_scores = d['sub_scores']
+        if 'sub_edges_in_graph' in d:
+            g.sub_edges_in_graph = d['sub_edges_in_graph']
+        if 'sub_nodes_in_graph' in d:
+            g.sub_nodes_in_graph = d['sub_nodes_in_graph']
+        if 'positional_sub_scores' in d:
+            g.positional_sub_scores = d['positional_sub_scores']
+        if 'positional_sub_edges_in_graph' in d:
+            g.positional_sub_edges_in_graph = d['positional_sub_edges_in_graph']
+        if 'positional_sub_nodes_in_graph' in d:
+            g.positional_sub_nodes_in_graph = d['positional_sub_nodes_in_graph']
 
         return g
 
