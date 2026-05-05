@@ -1040,17 +1040,17 @@ class Graph:
 
         if submlp_indices:
             assert isinstance(model_or_config, HookedTransformer)
-            neurons_by_layer = [[] for l in graph.cfg['n_layers']]
+            neurons_by_layer = [[] for l in range(graph.cfg['n_layers'])]
             for l,n in submlp_indices:
                 neurons_by_layer[l].append(n)
             max_neurons_by_layer = max(len(indices_in_layer) for indices_in_layer in neurons_by_layer)
-            graph.sub_scores = torch.zeros((graph.n_forward, graph.n_backward, max_neurons_by_layer, 2*max_neurons_by_layer))
-            graph.sub_edges_in_graph = torch.zeros_like(graph.sub_scores).bool()
-            graph.sub_nodes_in_graph = torch.zeros((graph.n_forward, max_neurons_by_layer))
+            graph.sub_scores = torch.zeros((graph.n_forward, graph.n_backward, max_neurons_by_layer+1, 2*max_neurons_by_layer+1))
+            # graph.sub_edges_in_graph = torch.zeros_like(graph.sub_scores).bool()
+            # graph.sub_nodes_in_graph = torch.zeros((graph.n_forward, max_neurons_by_layer+1))
         else:
             graph.sub_scores = None
-            graph.sub_edges_in_graph = None
-            graph.sub_nodes_in_graph = None
+        graph.sub_edges_in_graph = None #ultimately like sub_scores, but we don't want to get an OOM kill
+        graph.sub_nodes_in_graph = None #ultimately (graph.n_forward, max_neurons_by_layer+1), but we don't want OOM
         graph.positional_sub_scores = None #ultimately like sub_scores but with a position dimension in front
         graph.positional_sub_edges_in_graph = None
         graph.positional_sub_nodes_in_graph = None

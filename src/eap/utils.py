@@ -63,9 +63,9 @@ def make_hooks_and_matrices(
             The third set of hooks will compute the gradients and update the scores matrix that you passed in. 
     """
     separate_activations = model.cfg.use_normalization_before_and_after and scores is None
-    act_diff_size = [1, batch_size, n_pos, graph.n_forward, model.cfg.d_model, 1]
+    act_diff_size = [batch_size, n_pos, graph.n_forward, model.cfg.d_model, 1]
     if separate_activations:
-        act_diff_size[0] = 2
+        act_diff_size = [2] + act_diff_size
     if sub_scores := graph.sub_scores is not None:
         act_diff_size[-1] = graph.sub_scores.shape[2]
     activation_difference = torch.zeros(
