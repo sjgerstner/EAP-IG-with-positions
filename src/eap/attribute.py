@@ -1,5 +1,6 @@
 from typing import Callable, List, Optional, Literal, Tuple
 from functools import partial
+from warnings import warn
 
 import torch
 from torch.utils.data import DataLoader
@@ -81,7 +82,11 @@ def get_scores_eap(
         clean_tokens, attention_mask, input_lengths, n_pos = tokenize_plus(model, clean)
         scores_shape = [n_pos] + scores_shape
     if graph.sub_scores is not None:
-        scores_shape += [graph.sub_scores.shape[-2], graph.sub_scores.shape[-1]]
+        warn(
+            """Computing edge scores for subnodes is not supported as it leads to OOM errors.
+            The function will compute edge scores for full nodes only."""
+        )
+        #scores_shape += [graph.sub_scores.shape[-2], graph.sub_scores.shape[-1]]
 
     scores = torch.zeros(scores_shape, device=model.cfg.device, dtype=model.cfg.dtype)
 
@@ -135,10 +140,10 @@ def get_scores_eap(
             logits = model(clean_tokens, attention_mask=attention_mask)
             metric_value = metric(logits, clean_logits, input_lengths, label)
             metric_value.backward()
-            if graph.sub_scores is not None:
-                #the score of a node should just show the remainder without its specified subnodes
-                scores[...,:,0] -= scores[...,:,1:].sum(-1)
-                scores[...,0,:] -= scores[...,1:,:].sum(-2)
+            # if graph.sub_scores is not None:
+            #     #the score of a node should just show the remainder without its specified subnodes
+            #     scores[...,:,0] -= scores[...,:,1:].sum(-1)
+            #     scores[...,0,:] -= scores[...,1:,:].sum(-2)
 
     scores /= total_items
 
@@ -508,12 +513,12 @@ def attribute(
         scores /= model.cfg.d_model
 
     if kwargs["keep_pos_dims"]:
-        if graph.sub_scores is not None:
-            graph.positional_sub_scores = scores.to(graph.scores.device)
-        else:
+        # if graph.sub_scores is not None:
+        #     graph.positional_sub_scores = scores.to(graph.scores.device)
+        # else:
             graph.positional_scores = scores.to(graph.scores.device)
     else:
-        if graph.sub_scores is not None:
-            graph.sub_scores[:] = scores.to(graph.scores.device)
-        else:
+        # if graph.sub_scores is not None:
+        #     graph.sub_scores[:] = scores.to(graph.scores.device)
+        # else:
             graph.scores[:] =  scores.to(graph.scores.device)

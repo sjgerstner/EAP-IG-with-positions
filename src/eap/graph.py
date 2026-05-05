@@ -298,12 +298,14 @@ class Graph:
     nodes_in_graph: torch.Tensor  # (n_forward) tensor of whether the (source) node is in the graph
     positional_scores: Optional[torch.Tensor] #(n_pos, n_forward, n_backward)
     positional_edges_in_graph: Optional[torch.Tensor] #(n_pos, n_forward, n_backward)
-    sub_scores: Optional[torch.Tensor]
-    sub_edges_in_graph: Optional[torch.Tensor]
-    sub_nodes_in_graph: Optional[torch.Tensor]
-    positional_sub_scores: Optional[torch.Tensor]
-    positional_sub_edges_in_graph: Optional[torch.Tensor]
-    positional_sub_nodes_in_graph: Optional[torch.Tensor]
+    # sub_scores: Optional[torch.Tensor]
+    # sub_edges_in_graph: Optional[torch.Tensor]
+    subnodes_scores: Optional[torch.Tensor]
+    subnodes_in_graph: Optional[torch.Tensor]
+    # positional_sub_scores: Optional[torch.Tensor]
+    # positional_sub_edges_in_graph: Optional[torch.Tensor]
+    positional_subnodes_scores: Optional[torch.Tensor]
+    positional_subnodes_in_graph: Optional[torch.Tensor]
     forward_to_backward: torch.Tensor
     real_edge_mask: torch.Tensor   # (n_forward, n_backward) tensor of whether the edge is real (some edges are not real, e.g. m10->m2)
     mlp_mask_forward: torch.Tensor # (n_forward) tensor of whether the node is an MLP node
@@ -1044,16 +1046,16 @@ class Graph:
             for l,n in submlp_indices:
                 neurons_by_layer[l].append(n)
             max_neurons_by_layer = max(len(indices_in_layer) for indices_in_layer in neurons_by_layer)
-            graph.sub_scores = torch.zeros((graph.n_forward, graph.n_backward, max_neurons_by_layer+1, 2*max_neurons_by_layer+1))
+            graph.subnodes_scores = torch.zeros((graph.n_forward, graph.n_backward, max_neurons_by_layer+1))
             # graph.sub_edges_in_graph = torch.zeros_like(graph.sub_scores).bool()
-            # graph.sub_nodes_in_graph = torch.zeros((graph.n_forward, max_neurons_by_layer+1))
+            graph.subnodes_in_graph = torch.zeros((graph.n_forward, max_neurons_by_layer+1))
         else:
             graph.sub_scores = None
-        graph.sub_edges_in_graph = None #ultimately like sub_scores, but we don't want to get an OOM kill
-        graph.sub_nodes_in_graph = None #ultimately (graph.n_forward, max_neurons_by_layer+1), but we don't want OOM
-        graph.positional_sub_scores = None #ultimately like sub_scores but with a position dimension in front
-        graph.positional_sub_edges_in_graph = None
-        graph.positional_sub_nodes_in_graph = None
+            #graph.sub_edges_in_graph = None #ultimately like sub_scores, but we don't want to get an OOM kill
+            graph.subnodes_in_graph = None #ultimately (graph.n_forward, max_neurons_by_layer+1), but we don't want OOM
+        graph.positional_subnodes_scores = None #ultimately like sub_scores but with a position dimension in front
+        #graph.positional_sub_edges_in_graph = None
+        graph.positional_subnodes_in_graph = None
 
         input_node = InputNode(graph)
         graph.nodes[input_node.name] = input_node

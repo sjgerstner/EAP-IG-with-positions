@@ -63,11 +63,11 @@ def make_hooks_and_matrices(
             The third set of hooks will compute the gradients and update the scores matrix that you passed in. 
     """
     separate_activations = model.cfg.use_normalization_before_and_after and scores is None
-    act_diff_size = [batch_size, n_pos, graph.n_forward, model.cfg.d_model, 1]
+    act_diff_size = [batch_size, n_pos, graph.n_forward, model.cfg.d_model]
     if separate_activations:
         act_diff_size = [2] + act_diff_size
-    if sub_scores := graph.sub_scores is not None:
-        act_diff_size[-1] = graph.sub_scores.shape[2]
+    # if sub_scores := graph.sub_scores is not None:
+    #     act_diff_size[-1] = graph.sub_scores.shape[2]
     activation_difference = torch.zeros(
         tuple(act_diff_size),
         device=model.cfg.device,
@@ -93,30 +93,30 @@ def make_hooks_and_matrices(
                 "batch pos neurons, neurons d_model -> batch pos d_model neurons"
             )
         try:
-            if sub_scores:
-                if neuron_indices is not None:
-                    if separate_activations:
-                        if add:
-                            activation_difference[0, :, :, index, :, 1:] += acts
-                        else:
-                            activation_difference[1, :, :, index, :, 1:] += acts
-                    else:
-                        if add:
-                            activation_difference[:, :, index, :, 1:] += acts
-                        else:
-                            activation_difference[:, :, index, :, 1:] -= acts
-                else:
-                    if separate_activations:
-                        if add:
-                            activation_difference[0, :, :, index, :, 0] += acts
-                        else:
-                            activation_difference[1, :, :, index, :, 0] += acts
-                    else:
-                        if add:
-                            activation_difference[:, :, index, :, 0] += acts
-                        else:
-                            activation_difference[:, :, index, :, 0] -= acts
-            else:
+            # if sub_scores:
+            #     if neuron_indices is not None:
+            #         if separate_activations:
+            #             if add:
+            #                 activation_difference[0, :, :, index, :, 1:] += acts
+            #             else:
+            #                 activation_difference[1, :, :, index, :, 1:] += acts
+            #         else:
+            #             if add:
+            #                 activation_difference[:, :, index, :, 1:] += acts
+            #             else:
+            #                 activation_difference[:, :, index, :, 1:] -= acts
+            #     else:
+            #         if separate_activations:
+            #             if add:
+            #                 activation_difference[0, :, :, index, :, 0] += acts
+            #             else:
+            #                 activation_difference[1, :, :, index, :, 0] += acts
+            #         else:
+            #             if add:
+            #                 activation_difference[:, :, index, :, 0] += acts
+            #             else:
+            #                 activation_difference[:, :, index, :, 0] -= acts
+            # else:
                 if separate_activations:
                     if add:
                         activation_difference[0, :, :, index] += acts
@@ -132,7 +132,8 @@ def make_hooks_and_matrices(
             raise e
 
     def gradient_hook(
-        prev_index: int, bwd_index: Union[slice, int], gradients:torch.Tensor, hook, keep_pos_dims:bool=False, neuron_indices:Optional[torch.Tensor]=None,
+        prev_index: int, bwd_index: Union[slice, int], gradients:torch.Tensor, hook, keep_pos_dims:bool=False,
+        #neuron_indices:Optional[torch.Tensor]=None,
     ):
         """Takes in a gradient and uses it and activation_difference 
         to compute an update to the score matrix
@@ -148,22 +149,22 @@ def make_hooks_and_matrices(
         """
         grads = gradients.detach()
         try:
-            if neuron_indices:
-                _,_,layer_index,_,hook_type = hook.name.split('.')
-                layer_index = int(layer_index)
-                if hook_type=='hook_pre':
-                    grads = einsum(
-                        grads[...,neuron_indices], model.blocks[layer_index].mlp.W_gate[:,neuron_indices],
-                        "batch pos neurons, d_model neurons -> batch pos d_model neurons"
-                    )
-                elif hook_type=='hook_pre_linear':
-                    grads = einsum(
-                        grads[...,neuron_indices], model.blocks[layer_index].mlp.W_in[:,neuron_indices],
-                        "batch pos neurons, d_model neurons -> batch pos d_model neurons"
-                    )
-                else:
-                    raise RuntimeError(f"In the neuron-wise backward pass, the hook type must be hook_pre or hook_pre_linear, but got {hook_type}")
-                grads.unsqueeze(2)
+            # if neuron_indices:
+            #     _,_,layer_index,_,hook_type = hook.name.split('.')
+            #     layer_index = int(layer_index)
+            #     if hook_type=='hook_pre':
+            #         grads = einsum(
+            #             grads[...,neuron_indices], model.blocks[layer_index].mlp.W_gate[:,neuron_indices],
+            #             "batch pos neurons, d_model neurons -> batch pos d_model neurons"
+            #         )
+            #     elif hook_type=='hook_pre_linear':
+            #         grads = einsum(
+            #             grads[...,neuron_indices], model.blocks[layer_index].mlp.W_in[:,neuron_indices],
+            #             "batch pos neurons, d_model neurons -> batch pos d_model neurons"
+            #         )
+            #     else:
+            #         raise RuntimeError(f"In the neuron-wise backward pass, the hook type must be hook_pre or hook_pre_linear, but got {hook_type}")
+            #     grads.unsqueeze(2)
             if grads.ndim == 3:
                 grads = grads.unsqueeze(2)
             s = einsum(
@@ -171,19 +172,20 @@ def make_hooks_and_matrices(
                 grads,
                 f'batch pos forward hidden ..., batch pos backward hidden {"bwd_neurons " if neuron_indices else ""}->{" pos" if keep_pos_dims else ""} forward backward ... {"bwd_neurons" if neuron_indices else ""}'
             )
-            if neuron_indices:
-                s = s.squeeze(-2) #backward dimension is singleton
-                assert scores.shape[-1] % 2 ==1
-                if hook_type=='hook_pre':
-                    indices_to_fill = torch.arange(len(neuron_indices))*2 +1
-                elif hook_type=='hook_pre_linear':
-                    indices_to_fill = torch.arange(len(neuron_indices))*2 +2
-                else:
-                    raise RuntimeError()
-                scores[...,:prev_index, bwd_index, :, indices_to_fill] += s
-            else:
-                s = s.squeeze(-1) #backward dimension is singleton
-                scores[...,:prev_index, bwd_index] += s #(pos) n_forward n_backward
+            # if neuron_indices:
+            #     s = s.squeeze(-2) #backward dimension is singleton
+            #     assert scores.shape[-1] % 2 ==1
+            #     if hook_type=='hook_pre':
+            #         indices_to_fill = torch.arange(len(neuron_indices))*2 +1
+            #     elif hook_type=='hook_pre_linear':
+            #         indices_to_fill = torch.arange(len(neuron_indices))*2 +2
+            #     else:
+            #         raise RuntimeError()
+            #     scores[...,:prev_index, bwd_index, :, indices_to_fill] += s
+            # else:
+            s = s.squeeze(-1) #backward dimension is singleton
+            scores[...,:prev_index, bwd_index] += s #(pos) n_forward n_backward
+
         except RuntimeError as e:
             print(
                 hook.name, activation_difference.size(), activation_difference.device, grads.size(), grads.device
@@ -227,10 +229,10 @@ def make_hooks_and_matrices(
                 prev_index, bwd_index, keep_pos_dims=keep_pos_dims,
             )
         ))
-        if len(node.subnodes)>1:
-            neuron_indices = Tensor([subnode.index for subnode in node.subnodes])
-            fwd_hooks_corrupted.append(node.subnodes[1].out_hook, partial(activation_hook, fwd_index, add=lower_is_better, neuron_indices=neuron_indices))
-            fwd_hooks_clean.append(node.subnodes[1].out_hook, partial(activation_hook, fwd_index, add=not lower_is_better, neuron_indices=neuron_indices))
+        # if len(node.subnodes)>1:
+        #     neuron_indices = Tensor([subnode.index for subnode in node.subnodes])
+        #     fwd_hooks_corrupted.append(node.subnodes[1].out_hook, partial(activation_hook, fwd_index, add=lower_is_better, neuron_indices=neuron_indices))
+        #     fwd_hooks_clean.append(node.subnodes[1].out_hook, partial(activation_hook, fwd_index, add=not lower_is_better, neuron_indices=neuron_indices))
 
     node = graph.nodes['logits']
     prev_index = graph.prev_index(node)
