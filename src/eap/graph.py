@@ -1050,7 +1050,7 @@ class Graph:
             # graph.sub_edges_in_graph = torch.zeros_like(graph.sub_scores).bool()
             graph.subnodes_in_graph = torch.zeros((graph.n_forward, max_neurons_by_layer+1))
         else:
-            graph.sub_scores = None
+            graph.subnodes_scores = None
             #graph.sub_edges_in_graph = None #ultimately like sub_scores, but we don't want to get an OOM kill
             graph.subnodes_in_graph = None #ultimately (graph.n_forward, max_neurons_by_layer+1), but we don't want OOM
         graph.positional_subnodes_scores = None #ultimately like sub_scores but with a position dimension in front

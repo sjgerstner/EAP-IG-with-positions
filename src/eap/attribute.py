@@ -75,18 +75,17 @@ def get_scores_eap(
     Returns:
         Tensor: a [src_nodes, dst_nodes] tensor of scores for each edge
     """
-    scores_shape = [graph.n_forward, graph.n_backward]
-    if keep_pos_dims:
-        assert len(dataloader)==1, "positional is currently only implemented for single input"
-        clean, corrupted, label = next(iter(dataloader))
-        clean_tokens, attention_mask, input_lengths, n_pos = tokenize_plus(model, clean)
-        scores_shape = [n_pos] + scores_shape
-    if graph.sub_scores is not None:
-        warn(
-            """Computing edge scores for subnodes is not supported as it leads to OOM errors.
-            The function will compute edge scores for full nodes only."""
-        )
-        #scores_shape += [graph.sub_scores.shape[-2], graph.sub_scores.shape[-1]]
+    if graph.subnodes_scores is not None:
+        scores_shape = graph.subnodes_scores.shape
+        if keep_pos_dims:
+            raise NotImplementedError("Scoring positional subnodes is not implemented yet.")
+    else:
+        scores_shape = [graph.n_forward, graph.n_backward]
+        if keep_pos_dims:
+            assert len(dataloader)==1, "positional is currently only implemented for single input"
+            clean, corrupted, label = next(iter(dataloader))
+            clean_tokens, attention_mask, input_lengths, n_pos = tokenize_plus(model, clean)
+            scores_shape = [n_pos] + scores_shape
 
     scores = torch.zeros(scores_shape, device=model.cfg.device, dtype=model.cfg.dtype)
 
@@ -138,12 +137,14 @@ def get_scores_eap(
 
         with model.hooks(fwd_hooks=fwd_hooks_clean, bwd_hooks=bwd_hooks):
             logits = model(clean_tokens, attention_mask=attention_mask)
+            if graph.subnodes_scores is not None:
+                #the score of a node should just show the remainder without its specified subnodes
+                activation_difference[...,0] -= activation_difference[...,1:].sum(-1)
             metric_value = metric(logits, clean_logits, input_lengths, label)
             metric_value.backward()
-            # if graph.sub_scores is not None:
-            #     #the score of a node should just show the remainder without its specified subnodes
-            #     scores[...,:,0] -= scores[...,:,1:].sum(-1)
-            #     scores[...,0,:] -= scores[...,1:,:].sum(-2)
+            if graph.subnodes_scores is not None:
+                #the score of a node should just show the remainder without its specified subnodes
+                scores[...,0] -= scores[...,1:].sum(-1)
 
     scores /= total_items
 
