@@ -202,23 +202,28 @@ def make_hooks_and_matrices(
     fwd_index = graph.forward_index(node)
     fwd_hooks_corrupted.append((node.out_hook, partial(activation_hook, fwd_index, add=lower_is_better)))
     fwd_hooks_clean.append((node.out_hook, partial(activation_hook, fwd_index, add=not lower_is_better)))
+    if subnodes_scores:
+        bwd_hooks.append((node.out_hook, partial(gradient_hook, fwd_index, fwd_index, keep_pos_dims=keep_pos_dims)))
 
     for layer in range(graph.cfg['n_layers']):
         node = graph.nodes[f'a{layer}.h0']
         fwd_index = graph.forward_index(node)
         fwd_hooks_corrupted.append((node.out_hook, partial(activation_hook, fwd_index, add=lower_is_better)))
         fwd_hooks_clean.append((node.out_hook, partial(activation_hook, fwd_index, add=not lower_is_better)))
-        prev_index = graph.prev_index(node)
-        # assert isinstance(prev_index, int)
-        for i, letter in enumerate('qkv'):
-            bwd_index = graph.backward_index(node, qkv=letter)
-            bwd_hooks.append((
-                node.qkv_inputs[i],
-                partial(
-                    gradient_hook,
-                    prev_index, bwd_index, keep_pos_dims=keep_pos_dims,
-                )
-            ))
+        if subnodes_scores:
+            bwd_hooks.append((node.out_hook, partial(gradient_hook, fwd_index, fwd_index, keep_pos_dims=keep_pos_dims)))
+        else:
+            prev_index = graph.prev_index(node)
+            # assert isinstance(prev_index, int)
+            for i, letter in enumerate('qkv'):
+                bwd_index = graph.backward_index(node, qkv=letter)
+                bwd_hooks.append((
+                    node.qkv_inputs[i],
+                    partial(
+                        gradient_hook,
+                        prev_index, bwd_index, keep_pos_dims=keep_pos_dims,
+                    )
+                ))
 
         node = graph.nodes[f'm{layer}']
         fwd_index = graph.forward_index(node)
@@ -228,18 +233,20 @@ def make_hooks_and_matrices(
         fwd_hooks_corrupted.append((node.out_hook, partial(activation_hook, fwd_index, add=lower_is_better)))
         fwd_hooks_clean.append((node.out_hook, partial(activation_hook, fwd_index, add=not lower_is_better)))
         bwd_hooks.append((
-            node.in_hook,
+            node.in_hook if not subnodes_scores else node.out_hook,#TODO is this correct for the node-level case?
             partial(
                 gradient_hook,
-                prev_index, bwd_index, keep_pos_dims=keep_pos_dims,
+                prev_index if not subnodes_scores else fwd_index,
+                bwd_index if not subnodes_scores else fwd_index,
+                keep_pos_dims=keep_pos_dims,
             )
         ))
         if len(node.subnodes)>1:
             neuron_indices = Tensor([subnode.index for subnode in node.subnodes])
-            fwd_hooks_corrupted.append(node.subnodes[1].out_hook, partial(activation_hook, fwd_index, add=lower_is_better, neuron_indices=neuron_indices))
-            fwd_hooks_clean.append(node.subnodes[1].out_hook, partial(activation_hook, fwd_index, add=not lower_is_better, neuron_indices=neuron_indices))
+            fwd_hooks_corrupted.append((node.subnodes[1].out_hook, partial(activation_hook, fwd_index, add=lower_is_better, neuron_indices=neuron_indices)))
+            fwd_hooks_clean.append((node.subnodes[1].out_hook, partial(activation_hook, fwd_index, add=not lower_is_better, neuron_indices=neuron_indices)))
             #NOTE: we're using the out_hook here because there are several in_hooks which would complicate things
-            bwd_hooks.append(node.subnodes[1].out_hook, partial(gradient_hook, prev_index, bwd_index, neuron_indices=neuron_indices))
+            bwd_hooks.append((node.subnodes[1].out_hook, partial(gradient_hook, prev_index, bwd_index, neuron_indices=neuron_indices)))
 
     if not subnodes_scores:
         node = graph.nodes['logits']
