@@ -459,7 +459,7 @@ def get_scores_information_flow_routes(model: HookedTransformer, graph: Graph, d
 
     return scores
 
-allowed_aggregations = {'sum', 'mean'}    
+allowed_aggregations = {'sum', 'mean'}
 def attribute(
     model: HookedTransformer, graph: Graph, dataloader: DataLoader, metric: Callable[[Tensor], Tensor], 
     method: Literal['EAP', 'EAP-IG-inputs', 'clean-corrupted', 'EAP-IG-activations', 'information-flow-routes', 'exact'], 
@@ -508,6 +508,12 @@ def attribute(
         scores /= model.cfg.d_model
 
     if kwargs["keep_pos_dims"]:
-        graph.positional_scores = scores.to(graph.scores.device)
+        if graph.sub_scores is not None:
+            graph.positional_sub_scores = scores.to(graph.scores.device)
+        else:
+            graph.positional_scores = scores.to(graph.scores.device)
     else:
-        graph.scores[:] =  scores.to(graph.scores.device)
+        if graph.sub_scores is not None:
+            graph.sub_scores[:] = scores.to(graph.scores.device)
+        else:
+            graph.scores[:] =  scores.to(graph.scores.device)
