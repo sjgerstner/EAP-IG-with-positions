@@ -2,7 +2,7 @@ from typing import List, Dict, Union, Tuple, Literal, Optional, Set
 import json
 import heapq
 
-from einops import einsum, reduce
+from einops import einsum, reduce, repeat
 import torch
 from transformer_lens import HookedTransformer, HookedTransformerConfig
 import numpy as np
@@ -561,8 +561,7 @@ class Graph:
                 if level=='node':
                     self.in_graph += self.nodes_in_graph.view(-1, 1)
                 else:
-                    self.in_graph = included_nodes.any(dim=-1).view(-1,1)
-
+                    self.in_graph = repeat(included_nodes.any(dim=-1), 'forward -> forward backward', backward=self.n_backward)
         elif level == 'edge':
             if positional:
                 assert self.positional_scores is not None, "You haven't computed positional scores yet!"
