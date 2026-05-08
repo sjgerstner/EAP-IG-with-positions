@@ -1323,14 +1323,19 @@ class Graph:
         colors = {node.name: generate_random_color(colorscheme) for node in self.nodes.values()}
 
         for node in self.nodes.values():
-            if node.in_graph:
-                g.add_node(node.name,
-                        fillcolor=colors[node.name],
-                        color="black",
-                        style="filled, rounded",
-                        shape="box",
-                        fontname="Helvetica",
-                        )
+            for i,subnode in enumerate(node.subnodes):
+                if isinstance(subnode, Node):
+                    subnode_in_graph = subnode.in_graph
+                else:
+                    subnode_in_graph = self.subnodes_in_graph[self.forward_index(subnode.node, attn_slice=False), i]
+                if subnode_in_graph:
+                    g.add_node(subnode.name,
+                            fillcolor=colors[node.name],
+                            color="black",
+                            style="filled, rounded",
+                            shape="box",
+                            fontname="Helvetica",
+                            )
 
         if positional:
             assert self.positional_edges_in_graph is not None
@@ -1354,14 +1359,15 @@ class Graph:
                     "penwidth":str(penwidth),
                     "color":get_color(edge.qkv, edge.score),
                 }
-                if positional:
-                    kwargs["label"] = f'pos{pos}'
-                    kwargs["key"] = edge.name+f'pos{pos}'
-                else:
-                    kwargs["key"] = edge.name
-                g.add_edge(
-                    edge.parent.name,
-                    edge.child.name,
-                    **kwargs,
-                )
+                for parent in edge.parent.subnodes:
+                    for child in edge.child.subnodes:
+                        kwargs["key"] = str(parent.name)+'->'+str(child.name)
+                        if positional:
+                            kwargs["label"] = f'pos{pos}'
+                            kwargs["key"] += f'pos{pos}'
+                        g.add_edge(
+                            parent.name,
+                            child.name,
+                            **kwargs,
+                        )
         g.draw(filename, prog="dot")
