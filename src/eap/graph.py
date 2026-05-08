@@ -6,6 +6,7 @@ from einops import einsum, reduce, repeat
 import torch
 from transformer_lens import HookedTransformer, HookedTransformerConfig
 import numpy as np
+import pandas as pd
 
 from .visualization import get_color, generate_random_color
 
@@ -1370,3 +1371,25 @@ class Graph:
                             **kwargs,
                         )
         g.draw(filename, prog="dot")
+
+    def subnodes_to_pandas(self, savefile:str|None=None):
+        df = pd.DataFrame(columns=["name", "layer", "node_index", "subnode_index", "score"])
+        score_tensor = self.subnodes_scores if self.subnodes_scores is not None else self.nodes_scores.view(-1,1)
+        for node in self.nodes.values():
+            df.loc[len(df)] = {
+                        "name": node.name,
+                        "layer": node.layer,
+                        "node_index": subnode.index,
+                        "score": score_tensor[self.forward_index(node), 0]
+                    }
+            for i,subnode in enumerate(node.subnodes[1:]):
+                df.loc[len(df)] = {
+                    "name": subnode.name,
+                    "layer": node.layer,
+                    "node_index": node.index,
+                    "subnode_index": subnode.index,
+                    "score": score_tensor[self.forward_index(node), i+1]
+                }
+        if savefile:
+            df.to_csv(savefile)
+        return df
