@@ -492,7 +492,7 @@ class Graph:
         threshold: float,
         absolute: bool=True,
         reset: bool=True,
-        level:Literal['edge','node','neuron']='edge',
+        level:Literal['edge','node','neuron', 'subnode']='edge',
         positional: bool=False,
         prune=True,
         **prune_kwargs,
@@ -531,23 +531,37 @@ class Graph:
                 self.nodes_in_graph += self.neurons_in_graph.any(dim=1)
                 self.in_graph += self.nodes_in_graph.view(-1, 1)
 
-        elif level == 'node':
+        elif level in ('node', 'subnode'):#TODO implement subnode also for apply_topn
             if positional:
-                raise NotImplementedError("positional is currently only implemented for edge-level circuits")
-            unscored_nodes =  torch.isnan(self.nodes_scores)
-            
-            node_score_copy = self.nodes_scores.clone()
+                raise NotImplementedError(
+                    "positional is currently only implemented for edge-level circuits"
+                )
+            if level=='node':
+                assert self.nodes_scores is not None
+                unscored_nodes =  torch.isnan(self.nodes_scores)
+                node_score_copy = self.nodes_scores.clone()
+            else:#level=='subnode'
+                assert self.subnodes_scores is not None
+                unscored_nodes =  torch.isnan(self.subnodes_scores)
+                node_score_copy = self.subnodes_scores.clone()
+
             if absolute:
                 node_score_copy = torch.abs(node_score_copy)
-                
+
             node_score_copy[unscored_nodes] = torch.inf
             included_nodes = (node_score_copy >= threshold)
-            self.nodes_in_graph[:] = included_nodes
-                            
-            if reset: 
+            if level=='node':
+                self.nodes_in_graph[:] = included_nodes
+            else:
+                self.subnodes_in_graph = included_nodes
+
+            if reset:
                 # if we've reset the graph (everything is empty), add in the nodes that are on
                 # and activate their outgoing edges
-                self.in_graph += self.nodes_in_graph.view(-1, 1)
+                if level=='node':
+                    self.in_graph += self.nodes_in_graph.view(-1, 1)
+                else:
+                    self.in_graph = included_nodes.any(dim=-1).view(-1,1)
 
         elif level == 'edge':
             if positional:
