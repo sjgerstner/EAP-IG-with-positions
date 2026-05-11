@@ -74,7 +74,7 @@ def make_hooks_and_matrices(
             node_level = True
     activation_difference = torch.zeros(
         tuple(act_diff_size),
-        device=model.cfg.device,
+        device='cpu' if subnodes_scores else model.cfg.device,
         dtype=model.cfg.dtype,
     )
 
@@ -96,6 +96,7 @@ def make_hooks_and_matrices(
                 acts[...,neuron_indices], model.blocks[layer_index].mlp.W_out[neuron_indices,:],
                 "batch pos neurons, neurons d_model -> batch pos d_model neurons"
             )
+        acts = acts.to(activation_difference.device)
         try:
             if subnodes_scores:
                 if neuron_indices is not None:
@@ -172,11 +173,11 @@ def make_hooks_and_matrices(
             #     grads.unsqueeze(2)
             if grads.ndim == 3:
                 grads = grads.unsqueeze(2)
-            relevant_act_diff = (
+            relevant_act_diff = (#TODO is this assuming not separate_activations?
                 activation_difference[:, :, :prev_index] if not node_level
                 else activation_difference[:,:,prev_index] if isinstance(prev_index, slice)
                 else activation_difference[:,:,prev_index].unsqueeze(2)
-            )#TODO is this assuming not separate_activations?
+            ).to(grads.device)
             # if neuron_indices:
             #     relevant_act_diff = relevant_act_diff[...,1:len(neuron_indices)+1]
             # elif subnodes_scores:
@@ -200,7 +201,7 @@ def make_hooks_and_matrices(
 
             #if not node_level, then there is a singleton dimension "backward" at position -1.
             #if node_level, there is a singleton dimension "forward" at position (-2 if neuron_indices else -1)
-            s = s.squeeze(-2 if subnodes_scores else -1)
+            s = s.squeeze(-2 if subnodes_scores else -1).to(scores.device)
 
             if node_level:
                 if keep_pos_dims:

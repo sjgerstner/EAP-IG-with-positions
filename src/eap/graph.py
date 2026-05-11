@@ -31,7 +31,7 @@ class Node:
     qkv_inputs: Optional[List[str]]
     subnodes: List['Node|SubNode']
 
-    def __init__(self, name: str, layer:int, in_hook: List[str], out_hook: str, index: Tuple, 
+    def __init__(self, name: str, layer:int, in_hook: List[str], out_hook: str, index: Tuple,
                  graph:'Graph', qkv_inputs: Optional[List[str]]=None):
         self.name = name
         self.layer = layer
@@ -109,8 +109,8 @@ class SubNode():
     index: int
     in_hooks: list[str]
     out_hook: str
-    in_weights: list[torch.Tensor]
-    out_weights: torch.Tensor
+    in_weights: Optional[list[torch.Tensor]]
+    out_weights: Optional[torch.Tensor]
     name:str
     parents: Set['Node|SubNode']
     parent_edges: Set['Edge']
@@ -121,9 +121,9 @@ class SubNode():
         self,
         node:Node,  index:int,
         in_hooks:list[str], out_hook:str,
-        in_weights:list[torch.Tensor], out_weights:torch.Tensor
+        in_weights:Optional[list[torch.Tensor]]=None, out_weights:Optional[torch.Tensor]=None,
     ):
-        assert len(in_hooks)==len(in_weights), "Every in_hook also needs an in_weight!"
+        assert (in_weights is None) or (len(in_hooks)==len(in_weights)), "Every in_hook also needs an in_weight, right now the mapping is unclear!"
         self.node = node
         self.index = index
         self.name = node.name + '.' + str(index)
@@ -165,7 +165,10 @@ class MLPNode(Node):
 
 class MLPSubNode(SubNode):
     """Node corresponding to a single neuron in an MLP. in_weights have to be in the order [gate, in]"""
-    def __init__(self, node:MLPNode, index:int, in_weights:list[torch.Tensor], out_weights:torch.Tensor):
+    def __init__(
+        self, node:MLPNode, index:int,
+        in_weights:Optional[list[torch.Tensor]]=None, out_weights:Optional[torch.Tensor]=None,
+    ):
         layer = node.layer
         super().__init__(
             node=node, index=index,
@@ -311,6 +314,7 @@ class Graph:
     real_edge_mask: torch.Tensor   # (n_forward, n_backward) tensor of whether the edge is real (some edges are not real, e.g. m10->m2)
     mlp_mask_forward: torch.Tensor # (n_forward) tensor of whether the node is an MLP node
     mlp_mask_backward: torch.Tensor #(n_backward)
+    submlp_indices: Optional[list[tuple[int,int]]]
     cfg: GraphConfig
 
     def __init__(self):
@@ -1055,7 +1059,8 @@ class Graph:
             graph.neurons_scores = None
 
         if submlp_indices:
-            assert isinstance(model_or_config, HookedTransformer)
+            #assert isinstance(model_or_config, HookedTransformer)
+            graph.submlp_indices = submlp_indices
             neurons_by_layer = [[] for l in range(graph.cfg['n_layers'])]
             for l,n in submlp_indices:
                 neurons_by_layer[l].append(n)
@@ -1101,8 +1106,16 @@ class Graph:
                     MLPSubNode(
                         mlp_node,
                         index=n,
-                        in_weights=[model_or_config.blocks[layer].mlp.W_gate[:,n], model_or_config.blocks[layer].mlp.W_in[:,n]],
-                        out_weights=model_or_config.blocks[layer].mlp.W_out[n,:],
+                        in_weights=(
+                            [model_or_config.blocks[layer].mlp.W_gate[:,n], model_or_config.blocks[layer].mlp.W_in[:,n]]
+                            if isinstance(model_or_config, HookedTransformer)
+                            else None
+                        ),
+                        out_weights=(
+                            model_or_config.blocks[layer].mlp.W_out[n,:]
+                            if isinstance(model_or_config, HookedTransformer)
+                            else None
+                        ),
                     )
                     for n in neurons_by_layer[layer]
                 ]
@@ -1165,7 +1178,7 @@ class Graph:
             json.dump(d, f)
 
 
-    def to_pt(self, filename: str):
+    def to_pt(self, filename: str):#TODO save and load the subnode lists
         """Export this Graph as a .pt file
 
         Args:
@@ -1183,6 +1196,8 @@ class Graph:
             d['positional_scores'] = self.positional_scores
         if self.positional_edges_in_graph is not None:
             d['positional_edges_in_graphs'] = self.positional_edges_in_graph
+        if self.submlp_indices is not None:
+            d['submlp_indices'] = self.submlp_indices
         if self.subnodes_scores is not None:
             d['subnodes_scores'] = self.subnodes_scores
         # if self.sub_edges_in_graph is not None:
@@ -1259,7 +1274,10 @@ class Graph:
         assert all([k in d.keys() for k in required_keys]), f"Bad torch circuit file format. Found keys - {d.keys()}, missing keys - {set(required_keys) - set(d.keys())}"
         assert d['edges_scores'].shape == d['edges_in_graph'].shape, "Bad edges array shape"
 
-        g = Graph.from_model(d['cfg'])
+        g = Graph.from_model(
+            d['cfg'],
+            submlp_indices=d['submlp_indices'] if 'submlp_indices' in d else None,
+        )
 
         g.in_graph[:] = d['edges_in_graph']
         g.scores[:] = d['edges_scores']
@@ -1373,22 +1391,36 @@ class Graph:
         g.draw(filename, prog="dot")
 
     def subnodes_to_pandas(self, savefile:str|None=None):
-        df = pd.DataFrame(columns=["name", "layer", "node_index", "subnode_index", "score"])
-        score_tensor = self.subnodes_scores if self.subnodes_scores is not None else self.nodes_scores.view(-1,1)
+        df = pd.DataFrame(columns=[
+            "name",
+            "layer",
+            #"node_index",
+            "node_name",
+            "subnode_index",
+            "score",
+        ])
+        score_tensor = (
+            self.subnodes_scores if self.subnodes_scores is not None
+            else self.nodes_scores.view(-1,1)
+        )
         for node in self.nodes.values():
+            if node.name=='logits':
+                continue
             df.loc[len(df)] = {
                         "name": node.name,
                         "layer": node.layer,
-                        "node_index": subnode.index,
-                        "score": score_tensor[self.forward_index(node), 0]
+                        #"node_index": node.index,
+                        "node_name": node.name,
+                        "score": score_tensor[self.forward_index(node, attn_slice=False), 0].item(),
                     }
             for i,subnode in enumerate(node.subnodes[1:]):
                 df.loc[len(df)] = {
                     "name": subnode.name,
                     "layer": node.layer,
-                    "node_index": node.index,
+                    #"node_index": node.index,
+                    "node_name": node.name,
                     "subnode_index": subnode.index,
-                    "score": score_tensor[self.forward_index(node), i+1]
+                    "score": score_tensor[self.forward_index(node, attn_slice=False), i+1].item(),
                 }
         if savefile:
             df.to_csv(savefile)

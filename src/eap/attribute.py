@@ -87,7 +87,11 @@ def get_scores_eap(
             clean_tokens, attention_mask, input_lengths, n_pos = tokenize_plus(model, clean)
             scores_shape = [n_pos] + scores_shape
 
-    scores = torch.zeros(scores_shape, device=model.cfg.device, dtype=model.cfg.dtype)
+    scores = torch.zeros(
+        scores_shape,
+        device=model.cfg.device if graph.subnodes_scores is None else 'cpu',
+        dtype=model.cfg.dtype
+    )
 
     if 'mean' in intervention:
         assert intervention_dataloader is not None, "Intervention dataloader must be provided for mean interventions"
