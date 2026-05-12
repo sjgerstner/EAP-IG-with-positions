@@ -57,6 +57,7 @@ def get_scores_eap(
     quiet=False,
     keep_pos_dims:bool=False,
     lower_is_better:bool=True,
+    return_act_diff:bool=False,
 ):
     """Gets edge attribution scores using EAP.
 
@@ -146,12 +147,14 @@ def get_scores_eap(
                 activation_difference[...,0] -= activation_difference[...,1:].sum(-1)
             metric_value = metric(logits, clean_logits, input_lengths, label)
             metric_value.backward()
-            if graph.subnodes_scores is not None:
-                #the score of a node should just show the remainder without its specified subnodes
-                scores[...,0] -= scores[...,1:].sum(-1)
+            # if graph.subnodes_scores is not None:
+            #     #the score of a node should just show the remainder without its specified subnodes
+            #     scores[...,0] -= scores[...,1:].sum(-1)
 
     scores /= total_items
 
+    if return_act_diff:
+        return scores, activation_difference
     return scores
 
 def get_scores_eap_ig(model: HookedTransformer, graph: Graph, dataloader: DataLoader, metric: Callable[[Tensor], Tensor], steps=30, quiet=False):
@@ -489,11 +492,12 @@ def attribute(
     # Scores are by default summed across the d_model dimension
     # This means that scores are a [n_src_nodes, n_dst_nodes] tensor
     if method == 'EAP':
-        scores = get_scores_eap(
+        scores_and_acts = get_scores_eap(
             model, graph, dataloader, metric, intervention=intervention, 
             intervention_dataloader=intervention_dataloader, quiet=quiet,
             **kwargs,
         )
+        
     elif method == 'EAP-IG-inputs':
         if intervention != 'patching':
             raise ValueError(f"intervention must be 'patching' for EAP-IG-inputs, but got {intervention}")
@@ -513,6 +517,8 @@ def attribute(
     else:
         raise ValueError(f"method must be in ['EAP', 'EAP-IG-inputs', 'clean-corrupted', 'EAP-IG-activations', 'information-flow-routes', 'exact'], but got {method}")
 
+    if kwargs["return_act_diff"]:
+            scores, activation_difference = scores_and_acts
 
     if aggregation == 'mean':
         scores /= model.cfg.d_model
@@ -527,3 +533,6 @@ def attribute(
             graph.subnodes_scores[:] = scores.to(graph.scores.device)
         else:
             graph.scores[:] =  scores.to(graph.scores.device)
+
+    if kwargs["return_act_diff"]:
+        return activation_difference
